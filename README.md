@@ -4,7 +4,10 @@
 > - `passwf o @sock 3 -- cmd args..`
 > - `passfd p @sock`
 >
-> `PASSFDSOCK="$(mktemp)" passfd i \$PASSFDSOCK 4 -- ssh -o ProxyUseFDPass=yes -o 'ProxyCommand=passfd p $PASSFDSOCK' user@example.com'
+> `PASSFDSOCK="$(mktemp)" passfd i \$PASSFDSOCK 4 -- ssh -o ProxyUseFDPass=yes -o 'ProxyCommand=passfd p $PASSFDSOCK' user@example.com'`
+
+[![passfd Build Status](https://api.cirrus-ci.com/github/hilbix/passfd.svg)](https://cirrus-ci.com/github/hilbix/passfd/master)
+
 
 # PassFD
 
