@@ -312,13 +312,18 @@ P(open, void, int create)
 
   if (isdigit(n[0]))
     {
-      socklen_t	len;
-      int	dom;
-
       sock	= PFD_int(_, n);
+
+#ifdef SO_DOMAIN
+      int	dom;
+      socklen_t	len;
+
       len	= sizeof dom;
       if (getsockopt(sock, SOL_SOCKET, SO_DOMAIN, &dom, &len))
         PFD_OOPS(_, "socket option failure on fd=%d", sock);
+      if (dom != AF_UNIX)
+        PFD_OOPS(_, "socket not AF_UNIX (fd=%d)", sock);
+#endif
 
       if (_->listen)
         PFD_listen(_, sock, n);
