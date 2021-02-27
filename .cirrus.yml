@@ -5,5 +5,5 @@ task:
     - container:
         image: gcc:latest
   setup_script: make
-  test_script: sudo make install
+  install_script: make install
 
