@@ -49,6 +49,7 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 - `f` like `fork`: fork command after socket established (before incoming connect or after successful connection)
 - `u` like `use` followed by a list of FDs: use those FDs (compare: `read -u`) to pass the other FDs, default: 0 (this is for `p`)
 - `k` keep passed FDs open for forked command, too (this is for `i`)
+- `v` enable verbose mode (dumps status to stderr)
 - missing: use the defaults for the given mode
 
 `mode`:
@@ -87,10 +88,10 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 
 Fun Facts:
 
-- `retry` (without number) does 2 retries (or 3 tries total).  Why?  There are 2 `r` in `retry`
+- `retry` (without number) just increments the number of retries
 - A `retry` is, when `w` hits the maximum or the limit (max total time).
 - Backoff is added to `ms` each loop, then increment is added to backoff.
-- Retry numbers cannot go below 0.
+- Retry numbers can go below 0.
 - Waiting is capped at 128000ms if `ms` goes higher.
 
 Example to allow `ssh` to connect to FD 4 of the current shell:
