@@ -42,6 +42,7 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 - `a` like `accept`: create listening socket, which must not exist
 - `l` like `listen`: create listening socket, which is overwritten if it already exists
 - `c` like `connect`: connect to socket
+- `t` timeout in ms (for `a` and `c`).  Default: 10000ms
 - `r` like `retry` optionally followed by a number of retries: retry if something fails.  Defaults to the number of `r`s seen.  -1 means forever
 - `w` like `wait` optionally followed by numbers `max` `backoff` `ms` `increment` `limit`.  Waiting when socket setup fails.  Defaults to 1000 10 0 20 2000
 - `s` like `success`: execute command when `passfd` terminates successfully
@@ -55,7 +56,7 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 `mode`:
 
 - `i` like `into` socket: create new socket, wait for connection to socket, remove socket, pass FDs, terminate
-- `o` like `out` of socket: connect to socket, receive FDs, fork command with given args and given FDs
+- `o` like `out` of socket: connect to socket, receive FDs, exec command with given args and given FDs
 - `p` like `pass`: connect to socket, receive FDs, sort FDs by number, pass FDs to FDs given by `u`se
 
 `socket`:
@@ -88,7 +89,7 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 
 Fun Facts:
 
-- `retry` (without number) just increments the number of retries
+- `retry` (without number) increments the number of retries 2 time (as 'retry' includes 2 `r`)
 - A `retry` is, when `w` hits the maximum or the limit (max total time).
 - Backoff is added to `ms` each loop, then increment is added to backoff.
 - Retry numbers can go below 0.
