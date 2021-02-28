@@ -10,10 +10,12 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <errno.h>
+#include <time.h>
 #include <ctype.h>
 #include <unistd.h>
 #include <stdint.h>
 
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -33,8 +35,11 @@ struct PFD_passfd
 
     unsigned		done:1;
 
-    unsigned		listen:1, accept:1, connect:1, onsuccess:1, onerror:1, dofork:1, keepfds:1;
+    unsigned		listen:1, accept:1, connect:1, onsuccess:1, onerror:1, dofork:1, keepfds:1, verbose:1;
     unsigned char	mode;
+
+    int			retry;
+
     const char		*sockname;
     int			*fds, *waits, *uses, *recfd;
     char * const	*cmd;
@@ -45,10 +50,13 @@ struct PFD_passfd
  * Error processing
  **********************************************************************/
 
+#define	PFD_NOTYET(_,X,...)	PFD_OOPS(_, "not yet implemented in %s:%d:%s: " X, __FILE__, __LINE__, __func__, ##__VA_ARGS__)
 #define	PFD_INTERNAL(_,X,...)	PFD_OOPS(_, "internal error in %s:%d:%s: " X, __FILE__, __LINE__, __func__, ##__VA_ARGS__)
 
 P(exec, void);
 
+/* Terminate impl.
+ */
 P(vOOPS, void, int e, const char *s, va_list list)
 {
   fprintf(stderr, "OOPS: ");
@@ -61,6 +69,8 @@ P(vOOPS, void, int e, const char *s, va_list list)
   exit(23); abort(); for (;;);
 }
 
+/* Terminate
+ */
 P(OOPS, void, const char *s, ...)
 {
   va_list	list;
@@ -68,6 +78,75 @@ P(OOPS, void, const char *s, ...)
   va_start(list, s);
   PFD_vOOPS(_, errno, s, list);
   va_end(list);	/* never reached	*/
+}
+
+/* PFD_V/E/R impl
+ */
+P(vV, void, int e, const char *s, va_list list)
+{
+  time_t	t;
+  struct tm	tm;
+
+  time(&t);
+  gmtime_r(&t, &tm);	/* always use UTC!	*/
+  fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d ", tm.tm_year, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+  vfprintf(stderr, s, list);
+  if (e)
+    fprintf(stderr, ": %s", strerror(errno));
+  fprintf(stderr, "\n");
+  fflush(stderr);
+}
+
+/* PFD_V(_, ..) report verbose
+ */
+P(V, void, const char *s, ...)
+{
+  int		e = errno;
+  va_list	list;
+
+  if (!_->verbose)
+    return;
+  va_start(list, s);
+  PFD_vV(_, 0, s, list);
+  va_end(list);
+
+  errno	= e;
+}
+
+/* PFD_E(_, ..) report error if verbose
+ */
+P(E, void, const char *s, ...)
+{
+  int		e = errno;
+  va_list	list;
+
+  if (!_->verbose)
+    return;
+  fprintf(stderr, "fail: ");
+  va_start(list, s);
+  PFD_vV(_, e, s, list);
+  va_end(list);
+
+  errno	= e;
+}
+
+/* PFD_R(_, ret, ..) is PFD_V(_, ..) or PFD_E(_, ..) based on return code
+ */
+P(R, int, int ret, const char *s, ...)
+{
+  int		e = errno;
+  va_list	list;
+
+  if (!_->verbose)
+    return ret;
+  if (ret)
+    fprintf(stderr, "fail: ");
+  va_start(list, s);
+  PFD_vV(_, e, s, list);
+  va_end(list);
+
+  errno	= e;
+  return ret;
 }
 
 
@@ -121,7 +200,42 @@ P(init, void, const char *arg0)
 P(exit, int)
 {
   /* XXX TODO XXX free everything	*/
+  PFD_V(_, "return code %d", _->code);
   return _->code;
+}
+
+P(unlink, void, const char *name)
+{
+  struct stat	st;
+  const char	*what;
+
+  /* We can come here for regular files, too, which is very sad.
+   * Hence we first must check if it is really a Unix Domain Socket
+   * or an empty file (mktemp).
+   */
+  if (lstat(name, &st))
+    {
+      if (errno == ENOENT)
+        return;
+      PFD_OOPS(_, "cannot stat %s", name);
+    }
+
+  what="socket";
+  switch (st.st_mode & S_IFMT)
+    {
+    default:
+      PFD_OOPS(_, "incompatible file type: %s", name);
+    case S_IFREG:
+      if (st.st_size || st.st_blocks)
+        PFD_OOPS(_, "refuse to remove nonempty file: %s", name);
+      what="empty file";
+    case S_IFSOCK:
+        break;
+    }
+
+  PFD_R(_, unlink(name), "unlink %s: %s", what, name);
+
+  /* XXX TODO XXX what to do in error case?	*/
 }
 
 
@@ -178,20 +292,21 @@ P(split, struct PFD_split *, const char *s)
  * i[i[0]] last integer
  **********************************************************************/
 
+/* -1 .. MAX_INT	*/
 P(int, int, const char *s)
 {
-  char		*end;
-  unsigned long	u;
-  int		i;
+  char			*end;
+  unsigned long	long u;
+  int			i;
 
-  u	= strtoul(s, &end, 10);
+  u	= strtoll(s, &end, 10);
   i	= u;
-  if (i<0 || i != u || !end || *end)
-    PFD_OOPS(_, "Not a positive number: %s", s);
+  if (i<-1 || (unsigned long long)i != u || !end || *end)
+    PFD_OOPS(_, "number overflow: %s", s);
   return i;
 }
 
-P(getuint, int, int **i, const char *s)
+P(getint, int, int **i, const char *s)
 {
   if (!s)
     return 1;
@@ -205,13 +320,13 @@ P(getuint, int, int **i, const char *s)
         return 0;
       split	= PFD_split(_, env);
       for (argv=split->argv; *argv; argv++)
-        if (*argv && PFD_getuint(_, i, *argv))
+        if (*argv && PFD_getint(_, i, *argv))
           PFD_OOPS(_, "Parsing env var %s failed", s);
       PFD_split_free(_, split);
       return 0;
     }
 
-  if (!isdigit(*s))
+  if (!isdigit(*s) && strcmp(s, "-1"))	/* -1 is of special value	*/
     return 1;
 
   *i		= PFD_realloc(_, *i, (1 + ++(**i)) * sizeof **i);
@@ -219,12 +334,15 @@ P(getuint, int, int **i, const char *s)
   return 0;
 }
 
-P(getuints, char * const *, char * const * argv, int **i)
+P(getints, char * const *, char * const * argv, int **i)
 {
-  *i	= PFD_alloc(_, sizeof **i);
-  **i	= 0;
+  if (!*i)
+    {
+      *i	= PFD_alloc(_, sizeof **i);
+      **i	= 0;
+    }
   for (;; argv++)
-    if (PFD_getuint(_, i, *argv))
+    if (PFD_getint(_, i, *argv))
       return argv;
 }
 
@@ -235,13 +353,23 @@ P(getuints, char * const *, char * const * argv, int **i)
 
 P(close, void, int sock, const char *name)
 {
-  close(sock);
-  /* XXX TODO XXX error processing	*/
+  for (;;)
+    {
+      if (!close(sock))
+        {
+          PFD_V(_, "close %d: %s", sock, name);
+          return;
+        }
+      if (errno != EINTR)
+        PFD_OOPS(_, "close %d fail: %s: %s", sock, name);
+      PFD_V(_, "close %d interrupted: %s", sock, name);
+    }
 }
 
 P(connect, int, int sock, struct sockaddr_un *un, socklen_t max, const char *name)
 {
-  if (connect(sock, (struct sockaddr *)un, max))
+  PFD_V(_, "connecting %d: %s", sock, name);
+  if (PFD_R(_, connect(sock, (struct sockaddr *)un, max), "connect %d: %s", sock, name))
     return 1;
   _->sock	= sock;
   return 0;
@@ -250,18 +378,20 @@ P(connect, int, int sock, struct sockaddr_un *un, socklen_t max, const char *nam
 P(bind, int, int sock, struct sockaddr_un *un, socklen_t max, const char *name)
 {
   if (!bind(sock, (struct sockaddr *)un, max))
-    return 0;
+    {
+      PFD_V(_, "bind %d: %s", sock, name);
+      return 0;
+    }
   if (errno != EADDRINUSE)
     PFD_OOPS(_, "cannot bind to socket address: %s", name);
+
+  PFD_E(_, "bind %d: %s", sock, name);
   if (!un->sun_path[0] || !_->listen)
     return 1;
   if (!_->listen)
     return 1;
-  PFD_INTERNAL(_, "not yet implemented");
-#if 0
-  000;
-  unlink(_->sockname);
-#endif
+
+  PFD_unlink(_, name);
   return 1;
 }
 
@@ -269,6 +399,7 @@ P(listen, void, int sock, const char *name)
 {
   if (listen(sock, 1))
     PFD_OOPS(_, "listen() error: %s", name);
+  PFD_V(_, "listen %d: %s", sock, name);
 }
 
 P(accept, void, int sock, const char *name)
@@ -277,9 +408,11 @@ P(accept, void, int sock, const char *name)
     {
       int	fd;
 
+      PFD_V(_, "accept %d: %s", sock, name);
       fd	= accept(sock, NULL, NULL);
       if (fd>=0)
         {
+          PFD_V(_, "accepted %d", fd);
           _->sock	= fd;
           return;
         }
@@ -288,10 +421,66 @@ P(accept, void, int sock, const char *name)
     }
 }
 
-P(unlink, void, const char *name)
+/* to init, just assign {0} */
+struct PFD_retry
+  {
+    unsigned	inited, count, max, back, ms, incr, limit, total;
+  };
+
+P(retry_init, void, struct PFD_retry *r)
 {
-  unlink(name);
-  /* XXX TODO XXX error processing	*/
+  /* not DRY, but how to improve this?	*/
+  r->max	= _->waits && _->waits[0]>0 ? _->waits[1] : 1000;
+  r->back	= _->waits && _->waits[0]>1 ? _->waits[2] : 10;
+  r->ms		= _->waits && _->waits[0]>2 ? _->waits[3] : 0;
+  r->incr	= _->waits && _->waits[0]>3 ? _->waits[4] : 20;
+  r->limit	= _->waits && _->waits[0]>4 ? _->waits[5] : 2000;
+  r->inited	= 1;
+}
+
+P(retry, int, struct PFD_retry *r)
+{
+  if (!r->inited)
+    PFD_retry_init(_, r);
+
+  if (r->count > _->retry && _->retry >= 0)
+    return 1;	/* number retries exeeded	*/
+
+  if (r->ms)
+    {
+      unsigned u;
+
+      u	= r->ms;			/* r->ms<0 gives 128s	*/
+      if (u > 128000)
+        u	= 128000;		/* capped at 128s	*/
+      PFD_V(_, "sleep %ums", u);
+
+      /* usleep() cannot sleep more than 1s	*/
+      if (u >= 1000)
+        sleep(u / 1000);		/* ignore EINTR	*/
+      if (u % 1000)
+        usleep(1000 * (u % 1000));	/* ignore EINTR	*/
+
+      r->total	+= u;
+    }
+  else
+    r->total++;		/* Evade some edge cases	*/
+
+  if (r->back>0)
+    r->ms	+= r->back;
+  r->back	+= r->incr;
+
+  if (r->ms > r->max)
+    r->ms	= r->max;
+  else if (r->total < r->limit)
+    return 0;	/* we are in the micro-retries	*/
+
+  r->count	+= 1;
+  if (_->retry < 0)
+    PFD_V(_, "retry %u (unlimited)", r->count);
+  else
+    PFD_V(_, "retry %u of %d", r->count, _->retry);
+  return 0;
 }
 
 P(open, void, int create)
@@ -299,6 +488,7 @@ P(open, void, int create)
   const char		*n;
   struct sockaddr_un	sun;
   int			max, sock;
+  struct PFD_retry	retry = {0};
 
   n	= _->sockname;
   if (n)
@@ -310,6 +500,7 @@ P(open, void, int create)
     }
   if (!n || !*n)	PFD_INTERNAL(_, "missing socket name: %s", _->sockname);
 
+  /* Numeric socket: use given FD	*/
   if (isdigit(n[0]))
     {
       sock	= PFD_int(_, n);
@@ -331,11 +522,12 @@ P(open, void, int create)
       return;
     }
 
-  sun.sun_family	= AF_UNIX;
+  /* Open Regular or Abstract Unix Domain socket	*/
   max			= strlen(n);
   if (max > (int)sizeof(sun.sun_path))
     PFD_OOPS(_, "socket path too long: %s", n);
 
+  sun.sun_family	= AF_UNIX;
   strncpy(sun.sun_path, n, sizeof(sun.sun_path));
   if (n[0]=='@')
     sun.sun_path[0]     = 0;    /* Abstract Linux Socket        */
@@ -348,7 +540,7 @@ P(open, void, int create)
 
   for (;;)
     {
-      for (;;)
+      do
         {
           if (_->accept || _->listen || (!_->connect && create))
             {
@@ -360,13 +552,14 @@ P(open, void, int create)
               PFD_close(_, sock, n);
               return;
             }
-          if (PFD_connect(_, sock, &sun, max, n))
-            break;
-          return;
-        }
-      /* XXX TODO XXX implement retry	*/
-      PFD_OOPS(_, "socket open error: %s", n);
+          if (!PFD_connect(_, sock, &sun, max, n))
+            return;
+        } while (0);
+
+      if (PFD_retry(_, &retry))
+        break;
     }
+  PFD_OOPS(_, "socket open error: %s", n);
 }
 
 
@@ -374,16 +567,48 @@ P(open, void, int create)
  * Commandline parsing
  **********************************************************************/
 
-P(setwait, char * const *, char * const * argv)
+P(Swait, char * const *, char * const * argv)
 {
+  struct PFD_retry	r;
+
+  PFD_NOTYET(_, "wait option");	/* see above	*/
   if (_->waits)
     PFD_OOPS(_, "multiple option w");
-  return PFD_getuints(_, argv, &_->waits);
+  argv	= PFD_getints(_, argv, &_->waits);
+  if (*_->waits > 5)
+    PFD_OOPS(_, "too many wait arguments");
+  PFD_retry_init(_, &r);
+  PFD_V(_, "wait set to %d %d %d %d %d", r.max, r.back, r.ms, r.incr, r.limit);
+  return argv;
 }
 
-P(setuse, char * const *, char * const * argv)
+/* multiple retry args are just added
+ *
+ * Note: retry 5 5 could mean retry 5 times 5ms, which implies multiplication.  We do not do that.
+ */
+P(Sretry, char * const *, char * const * argv)
 {
-  return PFD_getuints(_, argv, &_->uses);
+  int	*n = 0;
+
+  argv	= PFD_getints(_, argv, &n);
+  if (n[0])
+    while (n[0])
+      _->retry	+= n[n[0]--];	/* ignore overflow	*/
+  else
+    _->retry++;
+  PFD_free(_, n);
+
+  if (_->retry < 0)
+    PFD_V(_, "retries set to unlimited");
+  else
+    PFD_V(_, "retries set to %d", _->retry);
+  return argv;
+}
+
+P(Suse, char * const *, char * const * argv)
+{
+  /* XXX TODO XXX verbose?	*/
+  return PFD_getints(_, argv, &_->uses);
 }
 
 P(usage, void)
@@ -424,12 +649,14 @@ P(setopt, char * const *, char * const * argv)
         case 'l':	_->listen	= 1;			/*fallthru*/
         case 'a':	_->accept	= 1;			break;
         case 'c':	_->connect	= 1;			break;
-        case 'w':	argv 		= PFD_setwait(_, argv);	continue;
+        case 'r':	argv		= PFD_Sretry(_, argv);	continue;
+        case 'w':	argv 		= PFD_Swait(_, argv);	continue;
         case 's':	_->onsuccess	= 1;			break;
         case 'e':	_->onerror	= 1;			break;
         case 'f':	_->dofork	= 1;			break;
-        case 'u':	argv		= PFD_setuse(_, argv);	continue;
+        case 'u':	argv		= PFD_Suse(_, argv);	continue;
         case 'k':	_->keepfds	= 1;			break;
+        case 'v':	_->verbose	= 1;			break;
 
         /* mode	*/
         case 'i':
@@ -456,7 +683,7 @@ P(setsock, char * const *, char * const * argv)
  */
 P(setfds, char * const *, char * const * argv)
 {
-  return PFD_getuints(_, argv, &_->fds);
+  return PFD_getints(_, argv, &_->fds);
 }
 
 
@@ -647,11 +874,11 @@ P(fork, void)
         return;
       switch (_->mode)
         {
-	default:	PFD_INTERNAL(_, "fork() %02x", _->mode);
+        default:	PFD_INTERNAL(_, "fork() %02x", _->mode);
         case 'o':	return;
-	case 'i':	if (_->connect) return;
-	case 'p':	break;
-	}
+        case 'i':	if (_->connect) return;
+        case 'p':	break;
+        }
     }
   pid	= fork();
   if (pid == (pid_t)-1)
@@ -666,6 +893,7 @@ P(fork, void)
 
 P(main_i, void)
 {
+  PFD_V(_, "pass: in");
   PFD_open(_, 1);
   PFD_fork(_);
   PFD_sendfd(_, _->sock);
@@ -673,6 +901,7 @@ P(main_i, void)
 
 P(main_o, void)
 {
+  PFD_V(_, "pass: out");
   PFD_open(_, 0);
   PFD_fork(_);
   PFD_recvfd(_);
@@ -682,6 +911,7 @@ P(main_p, void)
 {
   int	*fds, n, fd;
 
+  PFD_V(_, "pass: proxy");
   PFD_open(_, 0);
   PFD_fork(_);
   PFD_recvfd(_);
