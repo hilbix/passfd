@@ -17,6 +17,8 @@
  * RAM	O(N)
  */
 
+#define	mergesort	index_mergesort		/* protect against MacOSX	*/
+
 #ifndef	MERGESORT_USER_TYPE
 #define	MERGESORT_USER_TYPE	void *
 #endif
