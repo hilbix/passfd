@@ -4,6 +4,6 @@ task:
         image: catalina-xcode
     - container:
         image: gcc:latest
-  setup_script: make
+  make_script: make
   install_script: make install
 
