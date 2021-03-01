@@ -101,7 +101,7 @@ P(vV, void, int e, const char *prefix, const char *s, va_list list)
 
   time(&t);
   gmtime_r(&t, &tm);	/* always use UTC!	*/
-  fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d ", 1900+tm.tm_year, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+  fprintf(stderr, "%04d-%02d-%02d %02d:%02d:%02d [%d] ", 1900+tm.tm_year, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, (int)getpid());
   if (prefix)
     fprintf(stderr, "%s ", prefix);
   vfprintf(stderr, s, list);
@@ -438,6 +438,121 @@ P(ints, int, int *list, int **ret)
   return n;
 }
 
+/***********************************************************************
+ * File helpers
+ **********************************************************************/
+
+P(close, void, int sock, const char *name)
+{
+  for (;;)
+    {
+      if (!close(sock))
+        {
+          PFD_V(_, "close %d: %s", sock, name);
+          return;
+        }
+      if (errno != EINTR)
+        PFD_OOPS(_, "close %d fail: %s", sock, name);
+      PFD_V(_, "close %d interrupted: %s", sock, name);
+    }
+}
+
+
+/***********************************************************************
+ * Child execution
+ **********************************************************************/
+
+/* Map _->recfds according to _->fds into space
+ * returning FD which represents previous FD2
+ */
+P(map, int)
+{
+  int	fd2	= 2;
+  int	i, n0, n1;
+
+  n0	= _->fds[0];
+  n1	= _->recfds[0];
+  if (n1 < n0)
+    PFD_OOPS(_, "too few FDs received, got %d, expected at least %d", n1, n0);
+  for (i=0; ++i <= n0; )
+    {
+      int	fd0 = _->fds[i];
+      int	fd1 = _->recfds[i];
+
+      if (fd0 == fd2)
+        fd2	= dup(fd2);
+      if (fd0 != fd1)
+        {
+          dup2(fd1, fd0);
+          PFD_close(_, fd1, "(mapped fd)");
+          _->recfds[i]	= fd0;
+        }
+    }
+  return fd2;
+}
+
+P(exec, void, int dofork)
+{
+  if (_->done)
+    return;
+  _->done	= 1;
+  if (!_->cmd)
+    return;
+
+  if (dofork)
+    {
+      pid_t	pid;
+
+      pid	= fork();
+      if (pid == (pid_t)-1)
+        PFD_OOPS(_, "fork() failed");
+      if (!pid)
+        {
+          /* we return as child, as we terminate later on, but the forked command may stay */
+          PFD_V(_, "forked %d: %s", (int)pid, _->cmd[0]);
+          return;
+        }
+      /* forking is done before we have received FDs
+       * on i: just pass everything as is (passed fds are closed if not option 'keep', see PFD_main_i())
+       * on o: just pass everything as is
+       * on p: just pass everything as is (plus socketpair() created in PFD_fork())
+       */
+    }
+  else
+    {
+      /* exec is done after fds are possibly received
+       * on i: just pass everything as is (passed fds are closed if not option 'keep', see PFD_main_i())
+       * on o: pass the received FDs as listed
+       * on p: pass the received FDs as listed
+       */
+      if (_->recfds)
+        PFD_map(_);
+      PFD_V(_, "exec %s", _->cmd[0]);
+    }
+
+  execvp(_->cmd[0], _->cmd);
+  PFD_OOPS(_, "exec failure: %s", _->cmd[0]);
+}
+
+P(fork, void)
+{
+  if (!_->dofork)
+    {
+      if (_->onsuccess)
+        return;
+      switch (_->mode)
+        {
+        default:	PFD_INTERNAL(_, "fork() %02x", _->mode);
+        case 'o':	return;
+        case 'i':	if (_->connect) return;
+        case 'p':
+          000;
+          /* XXX TODO XXX add socketpair()	*/
+          break;
+        }
+    }
+  PFD_exec(_, 1);
+}
 
 
 /***********************************************************************
@@ -482,21 +597,6 @@ P(poll, void, int fd, int flag)
   pfd.fd	= fd;
   pfd.events	= flag;
   poll(&pfd, (nfds_t)1, _->timeout ? _->timeout : 10000);
-}
-
-P(close, void, int sock, const char *name)
-{
-  for (;;)
-    {
-      if (!close(sock))
-        {
-          PFD_V(_, "close %d: %s", sock, name);
-          return;
-        }
-      if (errno != EINTR)
-        PFD_OOPS(_, "close %d fail: %s", sock, name);
-      PFD_V(_, "close %d interrupted: %s", sock, name);
-    }
 }
 
 P(bind, int, int sock, struct sockaddr_un *un, socklen_t max, const char *name)
@@ -686,7 +786,11 @@ P(open, void, int create)
 
       if (_->listen)
         PFD_listen(_, sock, n);
-      PFD_accept(_, sock, n);
+      PFD_fork(_);
+      if (_->accept || _->listen || (!_->connect && create))
+         PFD_accept(_, sock, n);
+      else
+         _->sock	= sock;
       return;
     }
 
@@ -716,11 +820,15 @@ P(open, void, int create)
               if (PFD_bind(_, sock, &sun, max, n))
                 break;
               PFD_listen(_, sock, n);
+              PFD_fork(_);
               PFD_accept(_, sock, n);
               return;
             }
           if (!PFD_connect(_, sock, &sun, max, n))
-            return;
+            {
+              PFD_fork(_);
+              return;
+            }
         } while (0);
 
       if (PFD_retry(_, &retry))
@@ -1074,97 +1182,6 @@ P(sorter, void)
   mergesort(_, n, PFD_icmp, PFD_iswap, PFD_alloc, PFD_free);
 }
 
-/* Map _->recfds according to _->fds into space
- * returning FD which represents previous FD2
- */
-P(map, int)
-{
-  int	fd2	= 2;
-  int	i, n0, n1;
-
-  n0	= _->fds[0];
-  n1	= _->recfds[0];
-  if (n1 < n0)
-    PFD_OOPS(_, "too few FDs received, got %d, expected at least %d", n1, n0);
-  for (i=0; ++i <= n0; )
-    {
-      int	fd0 = _->fds[i];
-      int	fd1 = _->recfds[i];
-
-      if (fd0 == fd2)
-        fd2	= dup(fd2);
-      if (fd0 != fd1)
-        {
-          dup2(fd1, fd0);
-          PFD_close(_, fd1, NULL);
-          _->recfds[i]	= fd0;
-        }
-    }
-  return fd2;
-}
-
-P(exec, void, int dofork)
-{
-  if (_->done)
-    return;
-  _->done	= 1;
-  if (!_->cmd)
-    return;
-
-  if (dofork)
-    {
-      pid_t	pid;
-
-      pid	= fork();
-      if (pid == (pid_t)-1)
-        PFD_OOPS(_, "fork() failed");
-      if (pid)
-        {
-          PFD_V(_, "forked %d: %s", (int)pid, _->cmd[0]);
-          return;
-        }
-      /* forking is done before we have received FDs
-       * on i: just pass everything as is (passed fds are closed if not option 'keep', see PFD_main_i())
-       * on o: just pass everything as is
-       * on p: just pass everything as is (plus socketpair() created in PFD_fork())
-       */
-    }
-  else
-    {
-      /* exec is done after fds are possibly received
-       * on i: just pass everything as is (passed fds are closed if not option 'keep', see PFD_main_i())
-       * on o: pass the received FDs as listed
-       * on p: pass the received FDs as listed
-       */
-      if (_->recfds)
-        PFD_map(_);
-      PFD_V(_, "exec %s", _->cmd[0]);
-    }
-
-  execvp(_->cmd[0], _->cmd);
-  PFD_OOPS(_, "exec failure: %s", _->cmd[0]);
-}
-
-P(fork, void)
-{
-  if (!_->dofork)
-    {
-      if (_->onsuccess)
-        return;
-      switch (_->mode)
-        {
-        default:	PFD_INTERNAL(_, "fork() %02x", _->mode);
-        case 'o':	return;
-        case 'i':	if (_->connect) return;
-        case 'p':
-          000;
-          /* XXX TODO XXX add socketpair()	*/
-          break;
-        }
-    }
-  PFD_exec(_, 1);
-}
-
 P(main_i, void)
 {
   int	n, *fds;
@@ -1173,7 +1190,6 @@ P(main_i, void)
     PFD_cloexec(_, fds[n], _->keepfds);
   PFD_V(_, "pass: in");
   PFD_open(_, 1);
-  PFD_fork(_);
   PFD_sendfd(_, _->sock, _->fds);
 }
 
@@ -1181,7 +1197,6 @@ P(main_o, void)
 {
   PFD_V(_, "pass: out");
   PFD_open(_, 0);
-  PFD_fork(_);
   PFD_recvfd(_);
 }
 
@@ -1191,7 +1206,6 @@ P(main_p, void)
 
   PFD_V(_, "pass: proxy");
   PFD_open(_, 0);
-  PFD_fork(_);
   PFD_recvfd(_);
 
   PFD_sorter(_);
