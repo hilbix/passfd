@@ -1,6 +1,4 @@
 > This is mostly untested for now
->
-> `PASSFDSOCK="$(mktemp)" passfd l i \$PASSFDSOCK 4 -- ssh -o ProxyUseFDPass=yes -o 'ProxyCommand=passfd p $PASSFDSOCK' user@example.com`
 
 [![passfd Build Status](https://api.cirrus-ci.com/github/hilbix/passfd.svg)](https://cirrus-ci.com/github/hilbix/passfd/master)
 
@@ -25,11 +23,12 @@ Then to see the Usage:
 `passfd` also solves the problem where you cannot pass an FD via `exec()` for some reason.
 For example if "parent" wants to pass something to "grandchild", but "child" closes all FDs in between.
 
-`passfd` has 3 modes: in/pipe/out
+`passfd` has 4 modes: direct/in/pipe/out
 
-- Passing "in" means, send one or more FDs of the current process to a unix socket
-- Passing means, receive one or more FDs from one socket and pass them to another socket
-- Passing "out" means, receive one or more FDs and exec a program which then can use them
+- Mode "direct" means: Create a socket and pass this to some already open other unix socket
+- Mode "in" means:     Send one or more FDs of the current process to a (new) unix socket
+- Mode "pipe" means:   Receive one or more FDs from (new) socket and pass them to (open) socket
+- Mode "out" means:    Receive one or more FDs and exec a program which then can use them
 
 	passfd modifiers mode socket fds.. -- command args..
 
@@ -51,9 +50,10 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 
 `mode`:
 
+- `d` like `direct` socket: create new socket, wait for connection to socket, remove socket, pass FDs, terminate
 - `i` like `into` socket: create new socket, wait for connection to socket, remove socket, pass FDs, terminate
 - `o` like `out` of socket: connect to socket, receive FDs, exec command with given args and given FDs
-- `p` like `pass`: connect to socket, receive FDs, sort FDs by number, pass FDs to FDs given by `u`se
+- `p` like `pipe`: connect to socket, receive FDs, sort FDs by number, pass FDs to FDs given by `u`se
 
 `socket`:
 
@@ -81,11 +81,11 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 - `i` with `a` or `l` defaults to `f` (this makes sure the socket exists)
 - `i` with `c` defaults to `s`
 - `o` defaults to `s`
-- `p` defaults to `f`.  Note that command gets passed a socketpair as FD3 which receives the FDs
+- `p` defaults to `f`.  ~~In future, cmd gets passed a socketpair which receives the FDs~~
 
 Fun Facts:
 
-- `retry` (without number) increments the number of retries 2 time (as 'retry' includes 2 `r`)
+- `retry` (without number) increments the number of retries 2 times (as 'retry' includes 2 `r`)
 - A `retry` is, when `w` hits the maximum or the limit (max total time).
 - Backoff is added to `ms` each loop, then increment is added to backoff.
 - Retry numbers can go below 0.
@@ -95,6 +95,24 @@ Example to allow `ssh` to connect to FD 4 of the current shell:
 
 `PASSFDSOCK="$(mktemp)" passfd l i \$PASSFDSOCK 4 -- ssh -o ProxyUseFDPass=yes -o 'ProxyCommand=passfd p $PASSFDSOCK' user@example.com'
 
+
+# BUGs
+
+- socketpair option not yet implemented
+  - I am not completely sure how to do it properly and in which situation it would be helpful
+  - If you have any idea please open Issue
+
+- Inverse passing not yet implemented
+  - Means: pass from open socket to new socket
+  - I am not sure if this is needed at all
+  - I have no good idea how to call it
+  - Can be emulated with: `passfd out - 0 -- passfd in socket 0`
+
+- `direct` mode is limited
+  - It would be very demanding to implement everything which might be needed
+  - If this is a problem use a wrapper command like `socat` (or my tool `socklinger`) to do the actual wrapping
+  - However the tool should not `fork()`.  It should just `connect()` and then `exec()` passfd
+  - Also it is a bit redundant as `bash` supports something like `<>/dev/tcp/IP/port`
 
 # FAQ
 
