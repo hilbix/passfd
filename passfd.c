@@ -4,6 +4,7 @@
  * see file COPYRIGHT.CLL.  USE AT OWN RISK, ABSOLUTELY NO WARRANTY.
  */
 
+#include "VERSION.h"
 #include "passfd.h"
 
 /* This also is an example how to use passfd.h
