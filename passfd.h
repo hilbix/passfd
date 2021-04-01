@@ -42,9 +42,10 @@ struct PFD_passfd;
 
 struct PFD_passfd
   {
-    int			code;	/* exit code	*/
+    int			code;		/* exit code	*/
     const char		*arg0;
     int			sock;
+    int			bound_un;	/* sock is a bound Unix Domain Socket?	*/
 
     unsigned		done:1;
 
@@ -72,7 +73,7 @@ struct PFD_passfd
 #define	PFD_INTERNAL(X,...)	PFD_OOPS(_, "internal error in %s:%d:%s: " X, __FILE__, __LINE__, __func__, ##__VA_ARGS__)
 #define	PFD_FATAL(X,...)	do { if (X) PFD_OOPS(_, "fatal error in %s:%d:%s: " #X, __FILE__, __LINE__, __func__, ##__VA_ARGS__); } while (0)
 
-P(exec, void, int);
+P(exec, void, int, int);
 
 /* Terminate impl.
  */
@@ -84,7 +85,7 @@ P(vOOPS, void, int e, const char *s, va_list list)
     fprintf(stderr, ": %s", strerror(e));
   fprintf(stderr, "\n");
   if (_->onerror)
-    PFD_exec(_, 0);
+    PFD_exec(_, 0, 0);
   exit(23); abort(); for (;;);
 }
 
@@ -223,6 +224,7 @@ P(append, void, char *buf, size_t max, const char *s, ...)
     buf[max-1] = 0;
 }
 
+
 /***********************************************************************
  * Argument splitting
  **********************************************************************/
@@ -253,26 +255,23 @@ P(exit, int)
  * Note that checking and removing allows for some race condition
  * as there apparently is no way to do this atomically.  Sadly.
  */
-P(unlink, void, int fd, const char *name)
+P(unlink_sock, void, int fd)
 {
   struct stat	st1, st2;
   const char	*what;
 
-  /* following two ifs are special to PFD only	*/
-  if (*name == '@')	/* ignore Abstract Unix Domain Socket	*/
-    return;
-  if (isdigit(*name))	/* ignore FDs	*/
+  if (!_->bound_un)
     return;
 
   /* We can come here for regular files, too, which is very sad.
    * Hence we first must check if it is really a Unix Domain Socket.
    * We also allow to remove empty files (like mktemp).
    */
-  if (lstat(name, &st1))
+  if (lstat(_->sockname, &st1))
     {
       if (errno == ENOENT)
         return;
-      PFD_OOPS(_, "cannot stat %s", name);
+      PFD_OOPS(_, "cannot stat %s", _->sockname);
     }
   what="socket";	/* this is PFD special, we do not operate on files	*/
   if (fd<0)
@@ -280,20 +279,20 @@ P(unlink, void, int fd, const char *name)
       switch (st1.st_mode & S_IFMT)
         {
         default:
-          PFD_OOPS(_, "incompatible file type: %s", name);
+          PFD_OOPS(_, "incompatible file type: %s", _->sockname);
         case S_IFREG:
           if (st1.st_size || st1.st_blocks>1)
-            PFD_OOPS(_, "refuse to remove nonempty file: %s", name);
+            PFD_OOPS(_, "refuse to remove nonempty file: %s", _->sockname);
           what="empty file";
         case S_IFSOCK:
           break;
         }
     }
   else if (fstat(fd, &st2)<0)
-    PFD_OOPS(_, "cannot stat %d: %s", fd, name);
+    PFD_OOPS(_, "cannot stat %d: %s", fd, _->sockname);
   else if (st1.st_dev != st2.st_dev || st1.st_ino != st2.st_ino)
     {
-      PFD_V(_, "skip unlink: %d does not refer to %s", fd, name);
+      PFD_V(_, "skip unlink: %d does not refer to %s", fd, _->sockname);
       return;
     }
 
@@ -302,7 +301,8 @@ P(unlink, void, int fd, const char *name)
    *
    * Sadly, Unix has no atomic unlink() which fails if name does not refer to given fd
    */
-  PFD_R(_, unlink(name), "unlink %s: %s", what, name);
+  PFD_R(_, unlink(_->sockname), "unlink %s: %s", what, _->sockname);
+  _->bound_un	= 0;
 
   /* XXX TODO XXX what to do in error case?
    * Leave that to retry() for now.
@@ -450,6 +450,7 @@ P(ints, int, int *list, int **ret)
   return n;
 }
 
+
 /***********************************************************************
  * File helpers
  **********************************************************************/
@@ -469,6 +470,38 @@ P(close, void, int sock, const char *name)
         PFD_OOPS(_, "close %d fail: %s", sock, name);
       PFD_V(_, "close %d interrupted: %s", sock, name);
     }
+}
+
+
+/***********************************************************************
+ * Setters
+ **********************************************************************/
+
+P(recfds, void, int *fds)
+{
+  if (_->recfds)
+    PFD_free(_, _->recfds);
+  _->recfds	= fds;
+}
+
+P(sockname, void, const char *name)
+{
+  if (_->sockname == name)
+    return;
+  name		= PFD_dup(_, name);
+  PFD_free(_, (void *)_->sockname);
+  _->sockname	= name;
+}
+
+P(sock, void, int fd)
+{
+  if (fd<0)
+    PFD_OOPS(_, "socket() error");
+  if (fd == _->sock)
+    return;
+  if (_->sock>=0)
+    PFD_close(_, _->sock, _->sockname);
+  _->sock	= fd;
 }
 
 
@@ -503,13 +536,6 @@ P(map, int)
         }
     }
   return fd2;
-}
-
-P(recfds, void, int *fds)
-{
-  if (_->recfds)
-    PFD_free(_, _->recfds);
-  _->recfds	= fds;
 }
 
 P(waitpid, void, pid_t pid)
@@ -567,7 +593,7 @@ P(waitpid, void, pid_t pid)
  * dofork==0: exec (no fork())
  * dofork<0: fork() and return as parent
  */
-P(exec, void, int dofork)
+P(exec, void, int dofork, int fd)
 {
   if (_->done)
     return;
@@ -614,7 +640,7 @@ P(exec, void, int dofork)
 
       fds	= PFD_alloc(_, 2*sizeof (*fds));
       fds[0]	= 1;
-      fds[1]	= _->sock;
+      fds[1]	= fd;
       PFD_recfds(_, fds);
     }
   if (dofork<=0)
@@ -652,138 +678,13 @@ P(fork, void)
           break;
         }
     }
-  PFD_exec(_, 1);
+  PFD_exec(_, 1, 0);
 }
 
 
 /***********************************************************************
  * Socket functions
  **********************************************************************/
-
-P(cloexec, void, int fd, int keep)
-{
-  int	flag;
-
-  flag  = fcntl(fd, F_GETFD, 0);
-  if (keep)
-    flag	&= ~FD_CLOEXEC;
-  else
-    flag	|= FD_CLOEXEC;
-  if (flag<0 || fcntl(fd, F_SETFD, flag)<0)
-    PFD_OOPS(_, "fcntl() fail on %d", fd);
-}
-
-P(nonblock, void, int fd)
-{
-  int	flag;
-
-  flag  = fcntl(fd, F_GETFL, 0);
-  if (flag<0 || fcntl(fd, F_SETFL, flag|O_NONBLOCK)<0)
-    PFD_OOPS(_, "fcntl() fail on %d", fd);
-}
-
-P(blocking, void, int fd)
-{
-  int	flag;
-
-  flag  = fcntl(fd, F_GETFL, 0);
-  if (flag<0 || fcntl(fd, F_SETFL, flag&~O_NONBLOCK)<0)
-    PFD_OOPS(_, "fcntl() fail on %d", fd);
-}
-
-P(poll, void, int fd, int flag)
-{
-  struct pollfd pfd;
-
-  pfd.fd	= fd;
-  pfd.events	= flag;
-  poll(&pfd, (nfds_t)1, _->timeout ? _->timeout : 10000);
-}
-
-P(bind, int, struct sockaddr_un *un, socklen_t max)
-{
-  if (!bind(_->sock, (struct sockaddr *)un, max))
-    {
-      PFD_V(_, "bind %d: %s", _->sock, _->sockname);
-      return 0;
-    }
-  if (errno != EADDRINUSE)
-    PFD_OOPS(_, "cannot bind to socket address: %s", _->sockname);
-
-  PFD_E(_, "bind %d: %s", _->sock, _->sockname);
-  if (!un->sun_path[0] || !_->listen)
-    return 1;
-  if (!_->listen)
-    return 1;
-
-  PFD_unlink(_, -1, _->sockname);
-  return 1;
-}
-
-P(listen, void)
-{
-  if (listen(_->sock, 1))
-    PFD_OOPS(_, "listen() error: %s", _->sockname);
-  PFD_V(_, "listen %d: %s", _->sock, _->sockname);
-}
-
-P(accept, void)
-{
-  PFD_nonblock(_, _->sock);
-  for (;;)
-    {
-      int	fd;
-
-      PFD_V(_, "accept %d: %s", _->sock, _->sockname);
-      PFD_poll(_, _->sock, POLLIN);
-      fd	= accept(_->sock, NULL, NULL);
-      if (fd>=0)
-        {
-          PFD_unlink(_, _->sock, _->sockname);
-          PFD_close(_, _->sock, _->sockname);
-          PFD_cloexec(_, fd, 0);
-          PFD_V(_, "accepted %d", fd);
-          _->sock	= fd;
-          return;
-        }
-      if (errno != EINTR)
-        {
-          PFD_unlink(_, _->sock, _->sockname);	/* do not forget to cleanup!	*/
-          PFD_close(_, _->sock, _->sockname);
-          PFD_OOPS(_, "accept() error: %s", _->sockname);
-        }
-    }
-}
-
-/* Using connect() this way tastes odd.
- *
- * Due to nonblocking and a connected socket cannot be connected again,
- * we can happily loop over this until it succeeds.
- * So even with timeout 0 this should succeed eventually in a future retry.
- */
-P(connect, int, struct sockaddr_un *un, socklen_t max)
-{
-  PFD_nonblock(_, _->sock);
-  if (PFD_R(_, connect(_->sock, (struct sockaddr *)un, max), "connect %d: %s", _->sock, _->sockname) && errno != EISCONN)
-    {
-      int	err;
-      socklen_t	len;
-
-      if (errno != EINPROGRESS && errno != EALREADY)
-        return 1;
-
-      /* This code path is untested.
-       * EINPROGRESS seems to be impossible with Unix Domain Sockets
-       */
-      PFD_poll(_, _->sock, POLLIN);	/* obey timeout	*/
-
-      len	= sizeof(err);
-      if (PFD_R(_, getsockopt(_->sock, SOL_SOCKET, SO_ERROR, &err, &len) || err, "connect %d: %s", _->sock, _->sockname))
-        return 1;
-    }
-  PFD_blocking(_, _->sock);
-  return 0;
-}
 
 /* to init, just assign {0} */
 struct PFD_retry
@@ -851,6 +752,183 @@ P(retry, int, struct PFD_retry *r)
   return 0;
 }
 
+P(cloexec, void, int fd, int keep)
+{
+  int	flag;
+
+  flag  = fcntl(fd, F_GETFD, 0);
+  if (keep)
+    flag	&= ~FD_CLOEXEC;
+  else
+    flag	|= FD_CLOEXEC;
+  if (flag<0 || fcntl(fd, F_SETFD, flag)<0)
+    PFD_OOPS(_, "fcntl() fail on %d", fd);
+}
+
+P(nonblock, void, int fd)
+{
+  int	flag;
+
+  flag  = fcntl(fd, F_GETFL, 0);
+  if (flag<0 || fcntl(fd, F_SETFL, flag|O_NONBLOCK)<0)
+    PFD_OOPS(_, "fcntl() fail on %d", fd);
+}
+
+P(blocking, void, int fd)
+{
+  int	flag;
+
+  flag  = fcntl(fd, F_GETFL, 0);
+  if (flag<0 || fcntl(fd, F_SETFL, flag&~O_NONBLOCK)<0)
+    PFD_OOPS(_, "fcntl() fail on %d", fd);
+}
+
+P(poll, void, int fd, int flag)
+{
+  struct pollfd pfd;
+
+  pfd.fd	= fd;
+  pfd.events	= flag;
+  poll(&pfd, (nfds_t)1, _->timeout ? _->timeout : 10000);
+}
+
+P(bind_un, int, struct sockaddr_un *un, socklen_t max)
+{
+  _->bound_un	= un->sun_path[0];
+  if (!bind(_->sock, (struct sockaddr *)un, max))
+    {
+      PFD_V(_, "bind %d: %s", _->sock, _->sockname);
+      return 0;
+    }
+  if (errno != EADDRINUSE)
+    PFD_OOPS(_, "cannot bind to socket address: %s", _->sockname);
+
+  PFD_E(_, "bind %d: %s", _->sock, _->sockname);
+  if (!_->listen)
+    {
+      _->bound_un	= 0;
+      return 1;
+    }
+
+  PFD_unlink_sock(_, -1);
+  return 1;
+}
+
+P(listen, void)
+{
+  if (listen(_->sock, 1))
+    PFD_OOPS(_, "listen() error: %s", _->sockname);
+  PFD_V(_, "listen %d: %s", _->sock, _->sockname);
+}
+
+P(accept, void, struct sockaddr_un *un, socklen_t max, int create)
+{
+  struct PFD_retry	retry = {0};
+
+  if (un)
+    {
+      PFD_sock(_, socket(un->sun_family, SOCK_STREAM, 0));
+      PFD_cloexec(_, _->sock, 0);
+    }
+  do
+    {
+      int	fd;
+
+      _->done	= 0;
+
+      if (un && !_->bound_un && PFD_bind_un(_, un, max))
+        continue;
+
+      PFD_listen(_);
+      if (create>=0)
+        PFD_fork(_);
+
+      PFD_nonblock(_, _->sock);
+      PFD_V(_, "accept %d: %s", _->sock, _->sockname);
+      PFD_poll(_, _->sock, POLLIN);
+      fd	= accept(_->sock, NULL, NULL);
+      if (fd<0)
+        {
+          if (errno == EINTR || errno==EAGAIN || errno==EWOULDBLOCK)
+            continue;
+          break;
+        }
+      PFD_V(_, "accepted %d", fd);
+      if (create<0)
+        {
+          PFD_exec(_, -1, fd);
+          if (_->ret)
+            continue;
+        }
+      PFD_cloexec(_, fd, 0);
+      PFD_unlink_sock(_, _->sock);
+      PFD_sock(_, fd);
+      return;
+    } while (!PFD_retry(_, &retry));
+
+  PFD_unlink_sock(_, _->sock);	/* do not forget to cleanup!	*/
+  PFD_OOPS(_, "accept() error: %s", _->sockname);
+}
+
+/* Using connect() this way tastes odd.
+ *
+ * Due to nonblocking and a connected socket cannot be connected again,
+ * we can happily loop over this until it succeeds.
+ * So even with timeout 0 this should succeed eventually in a future retry.
+ */
+P(connect, void, struct sockaddr_un *un, socklen_t max, int create)
+{
+  struct PFD_retry	retry = {0};
+
+  do
+    {
+      if (un)
+        {
+          PFD_sock(_, socket(un->sun_family, SOCK_STREAM, 0));
+          PFD_cloexec(_, _->sock, 0);
+
+          PFD_nonblock(_, _->sock);
+          if (PFD_R(_, connect(_->sock, (struct sockaddr *)un, max), "connect %d: %s", _->sock, _->sockname) && errno != EISCONN)
+            {
+              int	err;
+              socklen_t	len;
+
+              if (errno != EINPROGRESS && errno != EALREADY)
+                continue;
+
+              /* This code path is untested.
+               * EINPROGRESS seems to be impossible with Unix Domain Sockets
+               */
+              PFD_poll(_, _->sock, POLLIN);	/* obey timeout	*/
+
+              len	= sizeof(err);
+              if (PFD_R(_, getsockopt(_->sock, SOL_SOCKET, SO_ERROR, &err, &len) || err, "connect %d: %s", _->sock, _->sockname))
+                continue;
+            }
+          PFD_blocking(_, _->sock);
+        }
+      _->done	= 0;
+      PFD_V(_, "connected to %s", _->sockname);
+      if (create>=0)
+        {
+          PFD_fork(_);
+          return;
+        }
+      PFD_exec(_, -1, _->sock);
+      if (!_->ret)
+        return;
+    } while (!PFD_retry(_, &retry));
+  PFD_OOPS(_, "connect() error: %s", _->sockname);
+}
+
+P(acceptconnect, void, struct sockaddr_un *un, socklen_t max, int create)
+{
+  if (_->accept || _->listen || (!_->connect && create>0))
+    PFD_accept(_, un, max, create);
+  else
+    PFD_connect(_, un, max, create);
+}
+
 P(getsockname, void)
 {
   const char		*name;
@@ -864,13 +942,7 @@ P(getsockname, void)
         name	= getenv(name+1);
     }
   if (!name || !*name)	PFD_INTERNAL("missing socket name: %s", _->sockname);
-  if (_->sockname != name)
-    {
-      name		= PFD_dup(_, name);
-      PFD_free(_, (void *)_->sockname);
-      _->sockname	= name;
-    }
-
+  PFD_sockname(_, name);
 }
 
 /* Open a socket given as numeric argument
@@ -894,11 +966,7 @@ P(open_nr, void, int create)
     }
 #endif
 
-  if (_->listen)
-    PFD_listen(_);
-  PFD_fork(_);
-  if (_->accept || _->listen || (!_->connect && create>0))
-    PFD_accept(_);
+  return PFD_acceptconnect(_, NULL, 0, create);
 }
 
 /* Open a socket given as Unix Domain Socket path
@@ -907,7 +975,6 @@ P(open_unix, void, int create)
 {
   struct sockaddr_un	sun;
   int			max;
-  struct PFD_retry	retry = {0};
 
   max			= strlen(_->sockname);
   if (max > (int)sizeof(sun.sun_path))
@@ -921,39 +988,9 @@ P(open_unix, void, int create)
   if (_->sockname[0]=='@')
     sun.sun_path[0]     = 0;    /* Abstract Linux Socket        */
 
-  _->sock	= socket(sun.sun_family, SOCK_STREAM, 0);
-  if (_->sock<0)
-    PFD_OOPS(_, "socket() error");
-  PFD_cloexec(_, _->sock, 0);
-
   max		+= offsetof(struct sockaddr_un, sun_path);
 
-  do
-    {
-      _->done	= 0;	/* allow exec() again	*/
-
-      if (_->accept || _->listen || (!_->connect && create==1))
-        {
-          if (PFD_bind(_, &sun, max))
-            continue;
-          PFD_listen(_);
-          if (create>=0)
-            PFD_fork(_);
-          PFD_accept(_);
-        }
-      else if (PFD_connect(_, &sun, max))
-        continue;
-      else if (create>=0)
-        PFD_fork(_);
-      if (create>=0)
-        return;
-
-      PFD_exec(_, -1);
-      if (!_->ret)
-        return;
-
-    } while (!PFD_retry(_, &retry));
-  PFD_OOPS(_, "socket open error: %s", _->sockname);
+  PFD_acceptconnect(_, &sun, max, create);
 }
 
 P(open_tcp, void, int create)
@@ -1133,7 +1170,7 @@ P(setopt, char * const *, char * const * argv)
  */
 P(setsock, char * const *, char * const * argv)
 {
-  _->sockname	= PFD_dup(_, *argv ? *argv++ : "0");
+  PFD_sockname(_, *argv ? *argv++ : "0");
   return argv;
 }
 
@@ -1295,7 +1332,7 @@ P(recvfd, void)
   fds		= PFD_alloc(_, n+sizeof (*fds));
   fds[0]	= mbuf;
   memcpy(fds+1, CMSG_DATA(cmsg), n);
-  _->recfds	= fds;
+  PFD_recfds(_, fds);
 
   cmsg	= CMSG_NXTHDR(&msg, cmsg);
   if (cmsg)
@@ -1394,7 +1431,7 @@ P(main, void)
     case 'o':	PFD_main_o(_);	break;
     case 'p':	PFD_main_p(_);	break;
     }
-  PFD_exec(_, 0);
+  PFD_exec(_, 0, 0);
 }
 
 #undef P
