@@ -35,6 +35,10 @@ clean:
 debian:
 	sudo apt-get install $(APT_INSTALL_FLAGS) -- `sed -n 's/^ #debian //p' *.c | tr ' ' '\n' | sort -u`
 
+.PHONY:	test
+test:	all
+	./Test.sh
+
 # Following is quite wrong, as it recompiles all *.o,
 # not only the one for the individual target,
 # and also it re-links everything needlessly in case a single *.o changes.
