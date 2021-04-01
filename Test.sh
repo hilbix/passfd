@@ -10,3 +10,5 @@ S=.tmp/test.sock
 o ./passfd v l i "$S" 0 <<< 'hello world' -- ./passfd v o "$S" 7 -- cmp <(echo hello world) /proc/self/fd/7
 [ -e "$S" ] && OOPS socket still exists: "$S"
 
+:
+
