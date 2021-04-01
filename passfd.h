@@ -46,6 +46,7 @@ struct PFD_passfd
     const char		*arg0;
     int			sock;
     int			bound_un;	/* sock is a bound Unix Domain Socket?	*/
+    struct stat		creation;	/* stat from creation time	*/
 
     unsigned		done:1;
 
@@ -257,7 +258,7 @@ P(exit, int)
  */
 P(unlink_sock, void, int fd)
 {
-  struct stat	st1, st2;
+  struct stat	st;
   const char	*what;
 
   if (!_->bound_un)
@@ -267,30 +268,25 @@ P(unlink_sock, void, int fd)
    * Hence we first must check if it is really a Unix Domain Socket.
    * We also allow to remove empty files (like mktemp).
    */
-  if (lstat(_->sockname, &st1))
+  if (lstat(_->sockname, &st))
     {
       if (errno == ENOENT)
         return;
       PFD_OOPS(_, "cannot stat %s", _->sockname);
     }
   what="socket";	/* this is PFD special, we do not operate on files	*/
-  if (fd<0)
+  switch (st.st_mode & S_IFMT)
     {
-      switch (st1.st_mode & S_IFMT)
-        {
-        default:
-          PFD_OOPS(_, "incompatible file type: %s", _->sockname);
-        case S_IFREG:
-          if (st1.st_size || st1.st_blocks>1)
-            PFD_OOPS(_, "refuse to remove nonempty file: %s", _->sockname);
-          what="empty file";
-        case S_IFSOCK:
-          break;
-        }
+    default:
+      PFD_OOPS(_, "incompatible file type: %s", _->sockname);
+    case S_IFREG:
+      if (st.st_size || st.st_blocks>1)
+        PFD_OOPS(_, "refuse to remove nonempty file: %s", _->sockname);
+      what="empty file";
+    case S_IFSOCK:
+      break;
     }
-  else if (fstat(fd, &st2)<0)
-    PFD_OOPS(_, "cannot stat %d: %s", fd, _->sockname);
-  else if (st1.st_dev != st2.st_dev || st1.st_ino != st2.st_ino)
+  if (fd>=0 && (st.st_dev != _->creation.st_dev || st.st_ino != _->creation.st_ino || st.st_mode != _->creation.st_mode))
     {
       PFD_V(_, "skip unlink: %d does not refer to %s", fd, _->sockname);
       return;
@@ -795,7 +791,8 @@ P(poll, void, int fd, int flag)
 P(bind_un, int, struct sockaddr_un *un, socklen_t max)
 {
   _->bound_un	= un->sun_path[0];
-  if (!bind(_->sock, (struct sockaddr *)un, max))
+  if (!bind(_->sock, (struct sockaddr *)un, max) &&
+      (!_->bound_un || !lstat(_->sockname, &_->creation)))
     {
       PFD_V(_, "bind %d: %s", _->sock, _->sockname);
       return 0;
@@ -1111,7 +1108,7 @@ P(usage, void)
         "	verbose	enable additional output to STDERR\n"
         "mode:\n"
         "	direct	connect to socket, exec cmd with FD, if ok pass socket to 'use'\n"
-        "	in	create new socket, wait for conn, remove socket, pass FDs, terminat\n"
+        "	in	create new socket, wait for conn, remove socket, pass FDs, terminate\n"
         "	out	connect to socket, receive FDs, exec cmd with args and received FDs\n"
         "	pass	connect to socket, receive FDs, sort FDs, pass FDs to 'use'\n"
         "socket:\n"
