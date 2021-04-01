@@ -5,6 +5,6 @@ task:
     - container:
         image: gcc:latest
   make_script: make
-  make_script: make test
+  test_script: make test
   install_script: make install
 
