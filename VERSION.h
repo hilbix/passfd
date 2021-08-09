@@ -1,1 +1,1 @@
-#define	PASSFD_VERSION "0.0.1"
+#define	PASSFD_VERSION "0.1.0"
