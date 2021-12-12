@@ -1003,6 +1003,7 @@ P(open_tcp, void, int create)
  * ->accept	use accept() only (for existing sockets)
  * ->connect	use connect()
  */
+/* THIS IS COMPLETE BULLSHIT! */
 P(open, void, int create)
 {
   PFD_getsockname(_);
@@ -1015,6 +1016,9 @@ P(open, void, int create)
     switch (_->sockname[0])
       {
       default:	return PFD_open_tcp(_, create);
+#if 0
+      case '|':	return PFD_open_fork(_, create);
+#endif
 
       case '@':
       case '/':
@@ -1093,7 +1097,7 @@ P(usage, void)
 {
   fprintf(stderr, "Usage (v" PASSFD_VERSION " " __DATE__ "): %s options.. mode socket fds.. -- cmd args..\n"
         "options (only first letter is important):\n"
-        "	help	show this usage"
+        "	help	show this usage\n"
         "	accept	create accepting socket (socket must not exist)\n"
         "	listen	create listening socket (socket overwritten if exist)\n"
         "	timeout	timeout (in ms) for accept/connect, default 10000ms\n"
@@ -1155,6 +1159,9 @@ P(setopt, char * const *, char * const * argv)
         case 'i':
         case 'o':
         case 'p':
+        case 'x':
+        case 'y':
+        case 'z':
           _->mode	= **argv++;
           return argv;
         }
