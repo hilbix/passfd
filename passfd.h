@@ -995,6 +995,11 @@ P(open_tcp, void, int create)
   PFD_OOPS(_, "not yet implemented.  Please use 'bash passfd <>/dev/tcp/$host/$port': %s", _->sockname);
 }
 
+P(open_fork, void, int create)
+{
+  PFD_OOPS(_, "forking open not yet implemented: %s", _->sockname);
+}
+
 /* create==0:	connect to Unix Domain Socket
  * create >0:	create Unix Domain Socket and wait for connection
  * create <0:	connect to some SOCK_STREAM
@@ -1003,22 +1008,27 @@ P(open_tcp, void, int create)
  * ->accept	use accept() only (for existing sockets)
  * ->connect	use connect()
  */
-/* THIS IS COMPLETE BULLSHIT! */
 P(open, void, int create)
 {
   PFD_getsockname(_);
 
   /* Numeric socket: use given FD	*/
   if (isdigit(_->sockname[0]))
-    return PFD_open_nr(_, create);
+    {
+      int	i;
+
+      for (i=0;;)
+        if (!_->sockname[++i])
+          return PFD_open_nr(_, create);
+        else if (!isdigit(_->sockname[i]))
+          break;
+    }
 
   if (create<0)
     switch (_->sockname[0])
       {
       default:	return PFD_open_tcp(_, create);
-#if 0
       case '|':	return PFD_open_fork(_, create);
-#endif
 
       case '@':
       case '/':
