@@ -25,6 +25,8 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 
+#include <netdb.h>
+
 #ifndef	PASSFD_VERSION
 #define	PASSFD_VERSION	"-undef"
 #endif
@@ -867,6 +869,46 @@ P(accept, void, struct sockaddr_un *un, socklen_t max, int create)
   PFD_OOPS(_, "accept() error: %s", _->sockname);
 }
 
+P(connect_sock, int, struct sockaddr *sa, socklen_t max, struct sockaddr *bind, socklen_t bindlen, int create)
+{
+  if (sa)
+    {
+      PFD_sock(_, socket(sa->sa_family, SOCK_STREAM, 0));
+      PFD_cloexec(_, _->sock, 0);
+
+      PFD_nonblock(_, _->sock);
+      if (PFD_R(_, connect(_->sock, sa, max), "connect %d: %s", _->sock, _->sockname) && errno != EISCONN)
+        {
+          int	err;
+          socklen_t	len;
+
+          if (errno != EINPROGRESS && errno != EALREADY)
+            return 1;
+
+          /* This code path is untested.
+           * EINPROGRESS seems to be impossible with Unix Domain Sockets
+           */
+          PFD_poll(_, _->sock, POLLOUT);	/* obey timeout	*/
+
+          len	= sizeof(err);
+          if (PFD_R(_, getsockopt(_->sock, SOL_SOCKET, SO_ERROR, &err, &len) || err, "connect %d: %s", _->sock, _->sockname))
+            return 1;
+        }
+      PFD_blocking(_, _->sock);
+    }
+
+  _->done	= 0;
+  PFD_V(_, "connected to %s", _->sockname);
+  if (create>=0)
+    {
+      PFD_fork(_);
+      return 0;
+    }
+  PFD_exec(_, -1, _->sock);
+  return _->ret;
+}
+
+
 /* Using connect() this way tastes odd.
  *
  * Due to nonblocking and a connected socket cannot be connected again,
@@ -879,40 +921,7 @@ P(connect, void, struct sockaddr_un *un, socklen_t max, int create)
 
   do
     {
-      if (un)
-        {
-          PFD_sock(_, socket(un->sun_family, SOCK_STREAM, 0));
-          PFD_cloexec(_, _->sock, 0);
-
-          PFD_nonblock(_, _->sock);
-          if (PFD_R(_, connect(_->sock, (struct sockaddr *)un, max), "connect %d: %s", _->sock, _->sockname) && errno != EISCONN)
-            {
-              int	err;
-              socklen_t	len;
-
-              if (errno != EINPROGRESS && errno != EALREADY)
-                continue;
-
-              /* This code path is untested.
-               * EINPROGRESS seems to be impossible with Unix Domain Sockets
-               */
-              PFD_poll(_, _->sock, POLLIN);	/* obey timeout	*/
-
-              len	= sizeof(err);
-              if (PFD_R(_, getsockopt(_->sock, SOL_SOCKET, SO_ERROR, &err, &len) || err, "connect %d: %s", _->sock, _->sockname))
-                continue;
-            }
-          PFD_blocking(_, _->sock);
-        }
-      _->done	= 0;
-      PFD_V(_, "connected to %s", _->sockname);
-      if (create>=0)
-        {
-          PFD_fork(_);
-          return;
-        }
-      PFD_exec(_, -1, _->sock);
-      if (!_->ret)
+      if (!PFD_connect_sock(_, (struct sockaddr *)un, max, NULL, (socklen_t)0, create))
         return;
     } while (!PFD_retry(_, &retry));
   PFD_OOPS(_, "connect() error: %s", _->sockname);
@@ -990,9 +999,101 @@ P(open_unix, void, int create)
   PFD_acceptconnect(_, &sun, max, create);
 }
 
+struct PFD_addr
+  {
+    char		*host;
+    char		*port;
+    struct addrinfo	*ai, *pos;
+  };
+
+P(addr, void, struct PFD_addr *a, char *name)
+{
+  char	*tmp;
+
+  a->port	= 0;
+  if ((tmp = strrchr(name, ':'))!=0)
+    {
+      *tmp++	= 0;
+      a->port	= PFD_dup(_, tmp);
+    }
+  a->host	= PFD_dup(_, name);
+}
+
+P(addr_free, void, struct PFD_addr *a)
+{
+  PFD_free(_, a->host);
+  PFD_free(_, a->port);
+  if (a->ai)
+    freeaddrinfo(a->ai);
+  memset(a, 0, sizeof *a);
+}
+
+P(addr_first, struct addrinfo *, struct PFD_addr *a)
+{
+  int	err;
+
+  if (a->ai)
+    freeaddrinfo(a->ai);
+  a->ai	= 0;
+  a->pos= 0;
+
+  if ((err = getaddrinfo(a->host, a->port, NULL, &a->ai)) != 0)
+    return 0;
+  return a->pos = a->ai;
+}
+
+P(addr_next, struct addrinfo *, struct PFD_addr *a)
+{
+  return a->pos = a->pos->ai_next;
+}
+
+P(open_tcp_connect, int, struct PFD_addr *dest, struct addrinfo *bind, int create)
+{
+  struct addrinfo	*ai;
+
+  for (ai=PFD_addr_first(_, dest); ai; ai=PFD_addr_next(_, dest))
+    if (!PFD_connect_sock(_, ai->ai_addr, ai->ai_addrlen, bind ? bind->ai_addr : NULL, bind ? bind->ai_addrlen : 0, create))
+      return 0;
+  return 1;
+}
+
+
 P(open_tcp, void, int create)
 {
-  PFD_OOPS(_, "not yet implemented.  Please use 'bash passfd <>/dev/tcp/$host/$port': %s", _->sockname);
+  struct PFD_retry	retry = {0};
+  char			*name, *tmp;
+  struct PFD_addr	bind = {0}, dest = {0};
+
+  name	= PFD_dup(_, _->sockname);
+
+  /* [host]:port[@bind]	*/
+  if ((tmp = strchr(name, '@'))!=0)
+    {
+      *tmp++	= 0;
+      PFD_addr(_, &bind, tmp);
+    }
+  PFD_addr(_, &dest, name);
+  PFD_free(_, name);
+
+  do
+    {
+      if (bind.host && bind.host[0])
+        {
+          struct addrinfo	*ai;
+
+          for (ai=PFD_addr_first(_, &bind); ai; ai=PFD_addr_next(_, &bind))
+            if (!PFD_open_tcp_connect(_, &dest, ai, create))
+              goto ok;
+        }
+     else if (PFD_open_tcp_connect(_, &dest, NULL, create))
+       goto ok;
+
+    } while (!PFD_retry(_, &retry));
+  PFD_OOPS(_, "open_tcp() error: %s", _->sockname);
+
+ok:
+  PFD_addr_free(_, &bind);
+  PFD_addr_free(_, &dest);
 }
 
 P(open_fork, void, int create)
