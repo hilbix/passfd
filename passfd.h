@@ -514,6 +514,7 @@ P(map, int)
 {
   int	fd2	= 2;
   int	i, n0, n1;
+  char	where[200];
 
   n0	= _->fds[0];
   n1	= _->recfds[0];
@@ -529,7 +530,8 @@ P(map, int)
       if (fd0 != fd1)
         {
           dup2(fd1, fd0);
-          PFD_close(_, fd1, "(mapped fd)");
+          snprintf(where, sizeof where, "(mapped to %d)", fd0);
+          PFD_close(_, fd1, where);
           _->recfds[i]	= fd0;
         }
     }
@@ -599,6 +601,21 @@ P(exec, void, int dofork, int fd)
   if (!_->cmd)
     return;
 
+  if (dofork<0)
+    {
+      /* forking is done after socket established
+       * on d: pass the socket
+       * all others: cannot happen
+       *
+       * So prepare ->recfds[] here for parent and child
+       */
+      int	*fds;
+
+      fds	= PFD_alloc(_, 2*sizeof (*fds));
+      fds[0]	= 1;
+      fds[1]	= fd;
+      PFD_recfds(_, fds);
+    }
   if (dofork)
     {
       /* forking is done before we have received FDs
@@ -627,19 +644,6 @@ P(exec, void, int dofork, int fd)
           PFD_waitpid(_, pid);
           return;
         }
-    }
-  if (dofork<0)
-    {
-      /* forking is done after socket established
-       * on d: pass the socket
-       * all others: cannot happen
-       */
-      int	*fds;
-
-      fds	= PFD_alloc(_, 2*sizeof (*fds));
-      fds[0]	= 1;
-      fds[1]	= fd;
-      PFD_recfds(_, fds);
     }
   if (dofork<=0)
     {
@@ -871,19 +875,21 @@ P(accept, void, struct sockaddr_un *un, socklen_t max, int create)
 
 P(connect_sock, int, struct sockaddr *sa, socklen_t max, struct sockaddr *bind, socklen_t bindlen, int create)
 {
+  /* TODO XXX TODO: bind
+   */
   if (sa)
     {
       PFD_sock(_, socket(sa->sa_family, SOCK_STREAM, 0));
       PFD_cloexec(_, _->sock, 0);
 
       PFD_nonblock(_, _->sock);
-      if (PFD_R(_, connect(_->sock, sa, max), "connect %d: %s", _->sock, _->sockname) && errno != EISCONN)
+      if (connect(_->sock, sa, max) && errno != EISCONN)
         {
           int	err;
           socklen_t	len;
 
           if (errno != EINPROGRESS && errno != EALREADY)
-            return 1;
+            goto fail;
 
           /* This code path is untested.
            * EINPROGRESS seems to be impossible with Unix Domain Sockets
@@ -892,7 +898,7 @@ P(connect_sock, int, struct sockaddr *sa, socklen_t max, struct sockaddr *bind, 
 
           len	= sizeof(err);
           if (PFD_R(_, getsockopt(_->sock, SOL_SOCKET, SO_ERROR, &err, &len) || err, "connect %d: %s", _->sock, _->sockname))
-            return 1;
+            goto fail;
         }
       PFD_blocking(_, _->sock);
     }
@@ -906,6 +912,11 @@ P(connect_sock, int, struct sockaddr *sa, socklen_t max, struct sockaddr *bind, 
     }
   PFD_exec(_, -1, _->sock);
   return _->ret;
+
+fail:
+  PFD_V(_, "failed to connect %d to %s", _->sock, _->sockname);
+  PFD_close(_, _->sock, _->sockname);
+  return 1;
 }
 
 
@@ -1085,7 +1096,7 @@ P(open_tcp, void, int create)
             if (!PFD_open_tcp_connect(_, &dest, ai, create))
               goto ok;
         }
-     else if (PFD_open_tcp_connect(_, &dest, NULL, create))
+     else if (!PFD_open_tcp_connect(_, &dest, NULL, create))
        goto ok;
 
     } while (!PFD_retry(_, &retry));
@@ -1383,7 +1394,7 @@ P(sendfd, void, int sock, int *list)
   cmsg->cmsg_len	= CMSG_LEN(pl);
   memcpy(CMSG_DATA(cmsg), fds, pl);
 
-  PFD_V(_, "sending %d fds:%s", n, PFD_intlist(_, buf, sizeof buf, fds, n));
+  PFD_V(_, "sending %d fds to %d:%s", n, sock, PFD_intlist(_, buf, sizeof buf, fds, n));
   if (sendmsg(sock, &msg, 0)<0)
     PFD_OOPS(_, "sendmsg() error socket %d", sock);
 }
