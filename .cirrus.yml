@@ -1,7 +1,7 @@
 task:
   matrix:
-    - osx_instance:
-        image: catalina-xcode
+    - macos_instance:
+        image: ghcr.io/cirruslabs/macos-sonoma-base:latest
     - container:
         image: gcc:latest
   make_script: make
