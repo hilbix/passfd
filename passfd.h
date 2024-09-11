@@ -598,8 +598,6 @@ P(exec, void, int dofork, int fd)
   if (_->done)
     return;
   _->done	= 1;
-  if (!_->cmd)
-    return;
 
   if (dofork<0)
     {
@@ -616,6 +614,10 @@ P(exec, void, int dofork, int fd)
       fds[1]	= fd;
       PFD_recfds(_, fds);
     }
+
+  if (!_->cmd)
+    return;
+
   if (dofork)
     {
       /* forking is done before we have received FDs
