@@ -24,7 +24,8 @@ all:	$(BINS)
 # Do not depend on $(BINS), as this usually is run with sudo
 .PHONY:	install
 install:
-	install -s $(BINS) $(INSTALL_PREFIX)/bin
+	echo Install..
+	$(INSTALL) -s $(BINS) $(INSTALL_PREFIX)/bin
 
 .PHONY:	clean
 clean:
