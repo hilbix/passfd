@@ -13,6 +13,8 @@ SRCS=$(wildcard *.c)
 BINS=$(SRCS:.c=)
 CFLAGS=-Wall -O3 -g
 
+INSTALL ?= install
+
 TMPDIR := .tmp
 
 .PHONY:	love
@@ -24,7 +26,6 @@ all:	$(BINS)
 # Do not depend on $(BINS), as this usually is run with sudo
 .PHONY:	install
 install:
-	echo Install..
 	$(INSTALL) -s $(BINS) $(INSTALL_PREFIX)/bin
 
 .PHONY:	clean
