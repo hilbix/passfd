@@ -88,7 +88,7 @@ P(vOOPS, void, int e, const char *s, va_list list)
     fprintf(stderr, ": %s", strerror(e));
   fprintf(stderr, "\n");
   if (_->onerror)
-    PFD_exec(_, 0, 0);
+    PFD_exec(_, 0, 1);
   exit(23); abort(); for (;;);
 }
 
@@ -482,6 +482,22 @@ P(recfds, void, int *fds)
   _->recfds	= fds;
 }
 
+P(recfdset, void, int n, ...)
+{
+  va_list	list;
+  int		*fds;
+
+  fds	= PFD_alloc(_, (n+1)*sizeof *fds);
+  PFD_recfds(_, fds);
+
+  *fds++	= n;
+  va_start(list, n);
+  while (--n>=0)
+    *fds++	= va_arg(list, int);
+  va_end(list);
+}
+
+
 P(sockname, void, const char *name)
 {
   if (_->sockname == name)
@@ -589,34 +605,18 @@ P(waitpid, void, pid_t pid)
   PFD_OOPS(_, "waitpid(): too many loops");
 }
 
-/* dofork>0: fork() and return as child
- * dofork==0: exec (no fork())
- * dofork<0: fork() and return as parent
+/* dofork>0:	fork() and return as child
+ * dofork==0:	exec (no fork())
+ * dofork<0:	fork() and return as parent
+ * map==0:	pass fds as is
+ * map>0:	map fds according to fd set given
+ * map<0:	map only fds according to fd set given
  */
-P(exec, void, int dofork, int fd)
+P(exec, void, int dofork, int map)
 {
   if (_->done)
     return;
   _->done	= 1;
-
-  if (dofork<0)
-    {
-      /* forking is done after socket established
-       * on d: pass the socket
-       * all others: cannot happen
-       *
-       * So prepare ->recfds[] here for parent and child
-       */
-      int	*fds;
-
-      fds	= PFD_alloc(_, 2*sizeof (*fds));
-      fds[0]	= 1;
-      fds[1]	= fd;
-      PFD_recfds(_, fds);
-    }
-
-  if (!_->cmd)
-    return;
 
   if (dofork)
     {
@@ -647,7 +647,7 @@ P(exec, void, int dofork, int fd)
           return;
         }
     }
-  if (dofork<=0)
+  if (map)
     {
       /* exec is done after fds are possibly received
        * on d: pass the socket (which is in _->recfds)
@@ -664,21 +664,48 @@ P(exec, void, int dofork, int fd)
   PFD_OOPS(_, "exec failure: %s", _->cmd[0]);
 }
 
+P(cloexec, void, int fd, int keep)
+{
+  int	flag;
+
+  flag  = fcntl(fd, F_GETFD, 0);
+  if (keep)
+    flag	&= ~FD_CLOEXEC;
+  else
+    flag	|= FD_CLOEXEC;
+  if (flag<0 || fcntl(fd, F_SETFD, flag)<0)
+    PFD_OOPS(_, "fcntl() fail on %d", fd);
+}
+
 P(fork, void)
 {
   if (!_->dofork)
     {
-      if (_->onsuccess)
+      if (!_->onsuccess)
         return;
       switch (_->mode)
         {
-        default:	PFD_INTERNAL("fork() %02x", _->mode);
+          int fds[2];
+
+        default:
+          PFD_INTERNAL("fork() %02x", _->mode);
+
         case 'd':
-        case 'o':	return;
-        case 'i':	if (_->connect) return;
+        case 'o':
+          return;
+
         case 'p':
-          000;
-          /* XXX TODO XXX add socketpair()	*/
+          if (!_->cmd)
+            return;		/* not needed, as there is no command, so the socketpair would be closed immediately	*/
+          if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds))
+            PFD_OOPS(_, "socketpair() failed");
+          PFD_cloexec(_, fds[0], 0);
+          PFD_recfdset(_, 1, fds[1]);
+          PFD_exec(_, 1, -1);
+          PFD_close(_, fds[1], "socketpair");
+          return;
+
+        case 'i':	if (_->connect) return;
           break;
         }
     }
@@ -754,19 +781,6 @@ P(retry, int, struct PFD_retry *r)
   r->count++;	/* increment here, because "retry 1 of 0" looks too wrong	*/
   PFD_retry_init(_, r);
   return 0;
-}
-
-P(cloexec, void, int fd, int keep)
-{
-  int	flag;
-
-  flag  = fcntl(fd, F_GETFD, 0);
-  if (keep)
-    flag	&= ~FD_CLOEXEC;
-  else
-    flag	|= FD_CLOEXEC;
-  if (flag<0 || fcntl(fd, F_SETFD, flag)<0)
-    PFD_OOPS(_, "fcntl() fail on %d", fd);
 }
 
 P(nonblock, void, int fd)
@@ -861,7 +875,8 @@ P(accept, void, struct sockaddr_un *un, socklen_t max, int create)
       PFD_V(_, "accepted %d", fd);
       if (create<0)
         {
-          PFD_exec(_, -1, fd);
+          PFD_recfdset(_, 1, fd);
+          PFD_exec(_, 1, 1);
           if (_->ret)
             continue;
         }
@@ -912,7 +927,8 @@ P(connect_sock, int, struct sockaddr *sa, socklen_t max, struct sockaddr *bind, 
       PFD_fork(_);
       return 0;
     }
-  PFD_exec(_, -1, _->sock);
+  PFD_recfdset(_, 1, _->sock);
+  PFD_exec(_, -1, 1);
   return _->ret;
 
 fail:
@@ -1070,7 +1086,7 @@ P(open_tcp_connect, int, struct PFD_addr *dest, struct addrinfo *bind, int creat
   return 1;
 }
 
-
+/* only for mode d, so create<0	*/
 P(open_tcp, void, int create)
 {
   struct PFD_retry	retry = {0};
@@ -1109,14 +1125,15 @@ ok:
   PFD_addr_free(_, &dest);
 }
 
+/* create<0:(d) create>0:(i) create==0:(o p)	*/
 P(open_fork, void, int create)
 {
   PFD_OOPS(_, "forking open not yet implemented: %s", _->sockname);
 }
 
-/* create==0:	connect to Unix Domain Socket
- * create >0:	create Unix Domain Socket and wait for connection
- * create <0:	connect to some SOCK_STREAM
+/* create==0:	o p	connect to Unix Domain Socket
+ * create >0:	i	create Unix Domain Socket and wait for connection
+ * create <0:	d	connect to some SOCK_STREAM
  * These default action of 'create' can be overwritten by options:
  * ->listen	use listen+accept()
  * ->accept	use accept() only (for existing sockets)
@@ -1138,17 +1155,20 @@ P(open, void, int create)
           break;
     }
 
-  if (create<0)
-    switch (_->sockname[0])
-      {
-      default:	return PFD_open_tcp(_, create);
-      case '|':	return PFD_open_fork(_, create);
+  switch (_->sockname[0])
+    {
+    case '|':
+      return PFD_open_fork(_, create);
 
-      case '@':
-      case '/':
-      case '.':
-        break;
-      }
+    default:
+      if (create<0)
+        return PFD_open_tcp(_, create); /* mode d	*/
+      /*falltrhu*/
+    case '@':
+    case '/':
+    case '.':
+      break;
+    }
   return PFD_open_unix(_, create);
 }
 
@@ -1236,9 +1256,12 @@ P(usage, void)
         "	verbose	enable additional output to STDERR\n"
         "mode:\n"
         "	direct	connect to socket, exec cmd with FD, if ok pass socket to 'use'\n"
+#if 0
+        "	gen	create socketpair, exec cmd with one side, pass other side to 'use'\n"
+#endif
         "	in	create new socket, wait for conn, remove socket, pass FDs, terminate\n"
         "	out	connect to socket, receive FDs, exec cmd with args and received FDs\n"
-        "	pass	connect to socket, receive FDs, sort FDs, pass FDs to 'use'\n"
+        "	proxy	connect to socket, receive FDs, sort FDs, pass FDs to 'use'\n"
         "socket:\n"
         "	'-' same as 0, number, @abstract, path\n"
         "	for 'd' it can also be [host]:port[@bind] (path must start with . or /)\n"
@@ -1255,7 +1278,7 @@ P(setopt, char * const *, char * const * argv)
   for (;;)
     {
       if (!*argv)
-        PFD_OOPS(_, "missing mode.  One of: d i o p  (Use h for help)");
+        PFD_OOPS(_, "missing mode.  One of: d g i o p  (Use h for help)");
       switch (**argv)
         {
         default:	PFD_OOPS(_, "invalid/unknown argument: %c", **argv);
@@ -1280,6 +1303,7 @@ P(setopt, char * const *, char * const * argv)
 
         /* mode	*/
         case 'd':
+        case 'g':
         case 'i':
         case 'o':
         case 'p':
@@ -1413,6 +1437,7 @@ P(recvfd, void)
   size_t		pl, tot;
   ssize_t		sz;
   char			buf[80];
+  int			n, *fds;
 
   pl			= 255 * sizeof(int);
   tot			= CMSG_SPACE(pl);
@@ -1446,7 +1471,6 @@ P(recvfd, void)
   cmsg	= CMSG_FIRSTHDR(&msg);
   if (!cmsg)
     PFD_OOPS(_, "recvmsg() no control message (no FDs?)");
-      int	n, *fds;
 
   if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
     PFD_OOPS(_, "recvmsg() control message not SCM_RIGHTS");
@@ -1521,6 +1545,12 @@ P(main_d, void)
   PFD_sendfds(_);
 }
 
+P(main_g, void)
+{
+  PFD_V(_, "pass: generate");
+  PFD_OOPS(_, "generate not yet implemented: %s", _->sockname);
+}
+
 P(main_i, void)
 {
   int	n, *fds;
@@ -1555,6 +1585,7 @@ P(main, void)
     {
     default:	PFD_INTERNAL("mode not d i o p: %c (%02x)", _->mode, _->mode);
     case 'd':	PFD_main_d(_);	break;
+    case 'g':	PFD_main_g(_);	break;
     case 'i':	PFD_main_i(_);	break;
     case 'o':	PFD_main_o(_);	break;
     case 'p':	PFD_main_p(_);	break;
