@@ -374,7 +374,7 @@ P(intlist, char *, char *buf, size_t len, int *ints, int n)
   return buf;
 }
 
-/* -1 .. MAX_INT	*/
+/* MIN_INT .. MAX_INT	*/
 P(int, int, const char *s)
 {
   char			*end;
@@ -383,7 +383,7 @@ P(int, int, const char *s)
 
   u	= strtoll(s, &end, 10);
   i	= u;
-  if (i<-1 || (unsigned long long)i != u || !end || *end)
+  if ((unsigned long long)i != u || !end || *end)
     PFD_OOPS(_, "number overflow: %s", s);
   return i;
 }
@@ -989,6 +989,7 @@ P(getsockname, void)
  */
 P(open_nr, void, int create)
 {
+  /* This is only called if _->sockname is all digits, so _->sock >= 0	*/
   _->sock	= PFD_int(_, _->sockname);
 
 #ifdef SO_DOMAIN
@@ -1184,21 +1185,24 @@ P(open, void, int create)
 
 P(Swait, char * const *, char * const * argv)
 {
-  struct PFD_retry	r;
+  struct PFD_retry	r = {0};
 
   if (_->waits)
     PFD_OOPS(_, "multiple option w");
   argv	= PFD_getints(_, argv+1, &_->waits);
   if (*_->waits > 5)
     PFD_OOPS(_, "too many wait arguments");
+  /* XXX TODO XXX: check r.max etc. for negative values being properly processed	*/
   PFD_retry_init(_, &r);
   PFD_V(_, "wait set to max=%d backoff=%d ms=%d increment=%d limit=%d", r.max, r.back, r.ms, r.incr, r.limit);
   return argv;
 }
 
-/* multiple retry args are just added
+/* multiple same letters in the argument are just added: rrrr tttt
  *
- * Note: retry 5 5 could mean retry 5 times 5ms, which implies multiplication.  We do not do that.
+ * retry 5 5 could mean retry 5 times 5ms, which implies multiplication.  We just add numbers.
+ *
+ * Make sure that negative numbers are seen as 'unlimited'.
  */
 P(S_int, char * const *, char * const * argv, int *ptr, const char *what)
 {
@@ -1226,11 +1230,13 @@ P(S_int, char * const *, char * const * argv, int *ptr, const char *what)
   return argv;
 }
 
+/* ->timeout < 0 means unlimited	*/
 P(Stmeout, char * const *, char * const * argv)
 {
   return PFD_S_int(_, argv, &_->timeout, "timeout");
 }
 
+/* ->retry < 0 means unlimited	*/
 P(Sretry, char * const *, char * const * argv)
 {
   return PFD_S_int(_, argv, &_->retry, "retry");
@@ -1260,18 +1266,19 @@ P(usage, void)
         "	keep	keep passed FDs open for forked cmd ('i' only)\n"
         "	verbose	enable additional output to STDERR\n"
         "mode:\n"
-        "	direct	connect to socket, exec cmd with FD, if ok pass socket to 'use'\n"
+        "	direct	pass socket to FD given in use: connect, exec cmd with socket, pass if OK\n"
 #if 0
         "	gen	create socketpair, exec cmd with one side, pass other side to 'use'\n"
 #endif
-        "	in	create new socket, wait for conn, remove socket, pass FDs, terminate\n"
-        "	out	connect to socket, receive FDs, exec cmd with args and received FDs\n"
-        "	proxy	connect to socket, receive FDs, sort FDs, pass FDs to 'use'\n"
+        "	in	pass FDs to socket: create+accept+remove, pass, terminate\n"
+        "	out	receive FDs from socket: connect+receive+exec cmd with args and FDs\n"
+        "	proxy	out+direct: connect to socket, receive FDs, sort FDs, pass FDs to 'use'\n"
         "socket:\n"
         "	'-' same as 0, number, @abstract, path\n"
         "	for 'd' it can also be [host]:port[@bind] (path must start with . or /)\n"
         "notes:\n"
         "	-1 is a special value, used for undefined/unlimited etc.\n"
+        "	Negative FDs: dup previous FD to the negated FD (for exec and 'use').\n"
         , _->arg0);
 }
 
