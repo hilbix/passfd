@@ -618,6 +618,9 @@ P(exec, void, int dofork, int map)
     return;
   _->done	= 1;
 
+  if (!_->cmd || !_->cmd[0])
+    PFD_OOPS(_, "nothing to run: missing -- cmd args..");
+
   if (dofork)
     {
       /* forking is done before we have received FDs
