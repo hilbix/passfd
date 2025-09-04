@@ -201,6 +201,23 @@ P(dup, char *, const char *s)
   return r;
 }
 
+/* dup() should be named dup1(), as there are dup2() and dup3()	*/
+P(dup1, int, int fd)
+{
+  int	n;
+
+  n	= dup(fd);
+  if (n<0)
+    PFD_E(_, "cannot dup FD %d", fd);
+  return n;
+}
+
+P(dup2, void, int from, int to)
+{
+  if (dup2(from, to) < 0)
+    PFD_E(_, "cannot dup FD %d to %d", from, to);
+}
+
 P(append, void, char *buf, size_t max, const char *s, ...)
 {
   size_t	len;
@@ -525,32 +542,109 @@ P(sock, void, int fd)
 
 /* Map _->recfds according to _->fds into space
  * returning FD which represents previous FD2
+ *
+ * This is a way more complex than anticipated:
+ *
+ * - we are allowed to override already open FDs (like STDIN/OUT)
+ * - FDs which are not map targets are untouched
+ * - original FDs which are mapped elsewhere are closed
+ *
+ * The problem is that we must not map an FD to another FD which must be mapped.
+ * But we must sure not to overwrite FDs which will be mapped later.
+ *
+ * mapping 5 to 3 and 3 to 5 involves an auxiliary dup() to save either 3 or 5
+ *
+ * XXX TODO XXX:
+ * - This is O(N*M)
+ * - should be improved to O(N+M).
+ * - Also it may use too many dup()s
  */
 P(map, int)
 {
   int	fd2	= 2;
-  int	i, n0, n1;
+  int	n0, n1, *arr, max, k, l;
   char	where[200];
+  size_t len;
 
+  /* XXX todo XXX dup negative FDs from previous	*/
   n0	= _->fds[0];
   n1	= _->recfds[0];
-  if (n1 < n0)
-    PFD_OOPS(_, "too few FDs received, got %d, expected at least %d", n1, n0);
-  for (i=0; ++i <= n0; )
-    {
-      int	fd0 = _->fds[i];
-      int	fd1 = _->recfds[i];
 
-      if (fd0 == fd2)
-        fd2	= dup(fd2);
-      if (fd0 != fd1)
-        {
-          dup2(fd1, fd0);
-          snprintf(where, sizeof where, "(mapped to %d)", fd0);
-          PFD_close(_, fd1, where);
-          _->recfds[i]	= fd0;
-        }
+  /* find max FD to map to	*/
+  max = -1;
+  for (int i=0; ++i <= n0; )
+    {
+      int f	= _->fds[i];
+      if (f < 0)
+        f	= -f;
+      if (max < f)
+        max	= f;
     }
+  if (max < 0)
+    return fd2;	/* nothing to map	*/
+
+  /* create the mapping arr[x] = y with y dupped to x	*/
+  len	= (max+1) * sizeof *arr;
+  arr	= PFD_alloc(_, len);
+  memset(arr, 0xff, len);		/* init to -1	*/
+
+  k	= 0;
+  l	= -1;
+  for (int i=0; ++i <= n0; )
+    {
+      int f	= _->fds[i];
+      if (f < 0)
+        {
+          if (l == -1)
+            PFD_OOPS(_, "cannot map to negative FD %d without previous FD", f);
+          f	= -f;
+        }
+      else if (++k >= n1)
+        {
+          PFD_V(_, "cannot map to %d", f);
+          l	= -2;
+        }
+      else
+        l	= _->recfds[k];
+
+      PFD_FATAL(f >= max, "memory corruption");
+      arr[f]	= l;
+    }
+  if (l < -1)
+    PFD_E(_, "only %d FDs received, need at least %d", n1, k);
+
+  /* now dup2(arr[x], x) */
+  for (int i=0; i<max; i++)
+    {
+      int f	= arr[i];
+      if (f < 0)
+        continue;
+      if (i == f)
+        {
+          arr[i]	= -3;	/* already mapped correctly	*/
+          continue;
+        }
+
+      /* check if out FD i still needs to be mapped elsewhere	*/
+      /* XXX TODO XXX often does more dup()s as needed	*/
+      for (int j=0; j<max; j++)
+        if (arr[j] == i)			/* i != f above	*/
+          arr[j]	= PFD_dup1(_, arr[j]);	/* remap it	*/
+
+      /* now map the FD	*/
+      if (fd2 == i)
+        fd2	= PFD_dup1(_, fd2);		/* safe FD2	*/
+
+      PFD_dup2(_, f, i);
+      snprintf(where, sizeof where, "(mapped to %d)", i);
+      PFD_close(_, f, where);
+
+      /* update recfds to the new value	*/
+      for (int j=0; ++j<=n1; )
+        if (_->recfds[j] == f)
+          _->recfds[j]	= f;
+    }
+
   return fd2;
 }
 
