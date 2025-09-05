@@ -618,8 +618,10 @@ P(exec, void, int dofork, int map)
     return;
   _->done	= 1;
 
-  if (!_->cmd || !_->cmd[0])
-    PFD_OOPS(_, "nothing to run: missing -- cmd args..");
+  if (!_->cmd)
+    return;
+  if (!_->cmd[0])
+    PFD_OOPS(_, "-- but missing cmd args..");
 
   if (dofork)
     {
