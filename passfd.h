@@ -577,7 +577,9 @@ P(map, int)
   max = -1;
   for (int i=0; ++i <= n0; )
     {
-      int f	= _->fds[i];
+      int f;
+
+      f	= _->fds[i];
       if (f < 0)
         f	= -f;
       if (max < f)
@@ -585,6 +587,10 @@ P(map, int)
     }
   if (max < 0)
     return fd2;	/* nothing to map	*/
+
+#if 0
+  PFD_V(_, "map %d %d max=%d", n0, n1, max);
+#endif
 
   /* create the mapping arr[x] = y with y dupped to x	*/
   len	= (max+1) * sizeof *arr;
@@ -602,7 +608,7 @@ P(map, int)
             PFD_OOPS(_, "cannot map to negative FD %d without previous FD", f);
           f	= -f;
         }
-      else if (++k >= n1)
+      else if (++k > n1)
         {
           PFD_V(_, "cannot map to %d", f);
           l	= -2;
@@ -610,37 +616,42 @@ P(map, int)
       else
         l	= _->recfds[k];
 
-      PFD_FATAL(f >= max, "memory corruption");
+      PFD_FATAL(f > max, "memory corruption");
       arr[f]	= l;
     }
   if (l < -1)
     PFD_E(_, "only %d FDs received, need at least %d", n1, k);
 
   /* now dup2(arr[x], x) */
-  for (int i=0; i<max; i++)
+  for (int i=0; i<=max; i++)
     {
       int f	= arr[i];
       if (f < 0)
         continue;
-      if (i == f)
-        {
-          arr[i]	= -3;	/* already mapped correctly	*/
-          continue;
-        }
 
       /* check if out FD i still needs to be mapped elsewhere	*/
       /* XXX TODO XXX often does more dup()s as needed	*/
-      for (int j=0; j<max; j++)
-        if (arr[j] == i)			/* i != f above	*/
-          arr[j]	= PFD_dup1(_, arr[j]);	/* remap it	*/
+      if (i != f)
+        {
+          for (int j=0; j<=max; j++)
+            if (arr[j] == f && j != i)
+              arr[j]	= PFD_dup1(_, arr[j]);	/* remap it	*/
 
-      /* now map the FD	*/
-      if (fd2 == i)
-        fd2	= PFD_dup1(_, fd2);		/* safe FD2	*/
+          /* now map the FD	*/
+          if (fd2 == i)
+            fd2	= PFD_dup1(_, fd2);		/* safe FD2	*/
+        }
 
-      PFD_dup2(_, f, i);
-      snprintf(where, sizeof where, "(mapped to %d)", i);
-      PFD_close(_, f, where);
+      if (f == i)
+        PFD_V(_, "kept %d", f);
+      else
+        {
+          PFD_dup2(_, f, i);
+          snprintf(where, sizeof where, "(mapped to %d)", i);
+          if (f != i)
+            PFD_close(_, f, where);
+        }
+      PFD_cloexec(_, i, 0);
 
       /* update recfds to the new value	*/
       for (int j=0; ++j<=n1; )
@@ -736,11 +747,8 @@ P(exec, void, int dofork, int map)
       if (dofork>0)
         {
           if (!pid)
-            {
-              /* we return as child, as we terminate later on, but the forked command may stay */
-              PFD_V(_, "forked %d: %s", (int)pid, _->cmd[0]);
-              return;
-            }
+            return;	/* we return as child, as we terminate later on, but the forked command may stay */
+          PFD_V(_, "forked %d: %s", (int)pid, _->cmd[0]);
         }
       else if (pid)
         {
