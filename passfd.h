@@ -539,6 +539,19 @@ P(sock, void, int fd)
   _->sock	= fd;
 }
 
+P(cloexec, void, int fd, int clo)
+{
+  int	flag;
+
+  flag  = fcntl(fd, F_GETFD, 0);
+  if (clo)
+    flag	|= FD_CLOEXEC;
+  else
+    flag	&= ~FD_CLOEXEC;
+  if (flag<0 || fcntl(fd, F_SETFD, flag)<0)
+    PFD_OOPS(_, "fcntl() fail on %d", fd);
+}
+
 
 /***********************************************************************
  * Child execution
@@ -774,19 +787,6 @@ P(exec, void, int dofork, int map)
   PFD_OOPS(_, "exec failure: %s", _->cmd[0]);
 }
 
-P(cloexec, void, int fd, int keep)
-{
-  int	flag;
-
-  flag  = fcntl(fd, F_GETFD, 0);
-  if (keep)
-    flag	&= ~FD_CLOEXEC;
-  else
-    flag	|= FD_CLOEXEC;
-  if (flag<0 || fcntl(fd, F_SETFD, flag)<0)
-    PFD_OOPS(_, "fcntl() fail on %d", fd);
-}
-
 P(fork, void)
 {
   if (!_->dofork)
@@ -809,7 +809,10 @@ P(fork, void)
             return;		/* not needed, as there is no command, so the socketpair would be closed immediately	*/
           if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds))
             PFD_OOPS(_, "socketpair() failed");
-          PFD_cloexec(_, fds[0], 0);
+#if 1
+          PFD_V(_, "socketpair %d %d", fds[0], fds[1]);
+#endif
+          PFD_cloexec(_, fds[0], 1);
           PFD_recfdset(_, 1, fds[1]);
           PFD_exec(_, 1, -1);
           PFD_close(_, fds[1], "socketpair");
@@ -957,7 +960,7 @@ P(accept, void, struct sockaddr_un *un, socklen_t max, int create)
   if (un)
     {
       PFD_sock(_, socket(un->sun_family, SOCK_STREAM, 0));
-      PFD_cloexec(_, _->sock, 0);
+      PFD_cloexec(_, _->sock, 1);
     }
   do
     {
@@ -990,7 +993,7 @@ P(accept, void, struct sockaddr_un *un, socklen_t max, int create)
           if (_->ret)
             continue;
         }
-      PFD_cloexec(_, fd, 0);
+      PFD_cloexec(_, fd, 1);
       PFD_unlink_sock(_, _->sock);
       PFD_sock(_, fd);
       return;
@@ -1007,7 +1010,7 @@ P(connect_sock, int, struct sockaddr *sa, socklen_t max, struct sockaddr *bind, 
   if (sa)
     {
       PFD_sock(_, socket(sa->sa_family, SOCK_STREAM, 0));
-      PFD_cloexec(_, _->sock, 0);
+      PFD_cloexec(_, _->sock, 1);
 
       PFD_nonblock(_, _->sock);
       if (connect(_->sock, sa, max) && errno != EISCONN)
@@ -1673,7 +1676,7 @@ P(main_i, void)
   int	n, *fds;
 
   for (n=PFD_ints(_, _->fds, &fds); --n>=0; )
-    PFD_cloexec(_, fds[n], _->keepfds);
+    PFD_cloexec(_, fds[n], !_->keepfds);
   PFD_V(_, "pass: in");
   PFD_open(_, 1);
   PFD_sendfd(_, _->sock, _->fds);
