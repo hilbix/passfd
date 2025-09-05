@@ -570,7 +570,6 @@ P(map, int)
   char	where[200];
   size_t len;
 
-  /* XXX todo XXX dup negative FDs from previous	*/
   n0	= _->fds[0];
   n1	= _->recfds[0];
 
