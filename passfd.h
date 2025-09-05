@@ -209,6 +209,7 @@ P(dup1, int, int fd)
   n	= dup(fd);
   if (n<0)
     PFD_E(_, "cannot dup FD %d", fd);
+  PFD_V(_, "dup %d: %d", fd, n);
   return n;
 }
 
@@ -216,6 +217,7 @@ P(dup2, void, int from, int to)
 {
   if (dup2(from, to) < 0)
     PFD_E(_, "cannot dup FD %d to %d", from, to);
+  PFD_V(_, "dup %d %d", from, to);
 }
 
 P(append, void, char *buf, size_t max, const char *s, ...)
