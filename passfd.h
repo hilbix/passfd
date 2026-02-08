@@ -1239,9 +1239,13 @@ ok:
   PFD_addr_free(_, &dest);
 }
 
-/* create<0:(d) create>0:(i) create==0:(o p)	*/
+/* create==0:	o p	???
+ * create >0:	i	???
+ * create <0:	d	create socketpair (bidir pipe) and fork command
+ */
 P(open_fork, void, int create)
 {
+  /* _->sockname starts with '|'	*/
   PFD_OOPS(_, "forking open not yet implemented: %s", _->sockname);
 }
 
