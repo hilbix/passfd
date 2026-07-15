@@ -1,0 +1,13 @@
+name: Standad build
+on: [push, pull_request]
+
+jobs:
+  linux-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: make
+      - name: install
+        run: which sudo && sudo make install || make install
+
