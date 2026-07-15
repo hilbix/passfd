@@ -54,15 +54,16 @@ For example if "parent" wants to pass something to "grandchild", but "child" clo
 - Mode "in" means:     Send one or more FDs of the current process to a (new) unix socket
 - Mode "pipe" means:   Receive one or more FDs from (new) socket and pass them to (open) socket
 - Mode "out" means:    Receive one or more FDs and exec a program which then can use them
-- Mode "x" means:      Start of bidirectional pipes
-- Mode "y" means:      Middle of bidirectional pipes
-- Mode "x" means:      End of bidirectional pipes
+- Mode "x" means:      Start of bidirectional pipes (not yet implemented)
+- Mode "y" means:      Middle of bidirectional pipes (not yet implemented)
+- Mode "x" means:      End of bidirectional pipes (not yet implemented)
 
 	passfd modifiers mode socket fds.. -- command args..
 
 `modifiers` (unused: `bgjm`)
 
 - `a` like `accept`: create new listening socket, which must not exist
+- `b` like `background`: do not wait for termination of command
 - `l` like `listen`: create listening socket, which is overwritten if it already exists
 - `c` like `connect`: connect to socket
 - `t` timeout in ms (for `a` and `c`).  Default: 10000ms
@@ -163,14 +164,53 @@ You can test this locally with `bash` as follows:
 	4<>/dev/tcp/127.0.0.1/22 PASSFDSOCK="$(mktemp)" passfd l i \$PASSFDSOCK 4 -- ssh -o ProxyUseFDPass=yes -o 'ProxyCommand=passfd p $PASSFDSOCK' $LOGNAME 
 
 
+## P: Pass some FD for a jumphost
+
+	ProxyUseFDPass  yes
+	ProxyCommand /usr/local/bin/passfd u 0 b s p - 0 -1 -- /usr/bin/ssh user@jumphost -W %h:%p
+
+You might think, this can be done with ProxyCommand directly.  Right.  However think of a script which is able to pass direct sockets, too.
+Like this:
+
+	#!/bin/bash
+
+	case "$1" in
+	(127.0.0.1:*)	exec /usr/local/bin/passfd v direct "$1:$2";;
+	(*)		exec /usr/local/bin/passfd v u 0 b s p - 0 -1 -- /usr/bin/ssh user@jumphost -W "$1:$2";;
+	esac
+
+Why it is a bit cryptic and what this does:
+
+- `v` enables verbose mode.  (You do not need this.  Everything else is needed.)
+- `u 0` tells `p` to pass the "received" FDs (here: 1) to the parent via FD 0 (STDIN)
+- `b` tells to run the command (`/usr/bin/ssh user@jumphost`) in background
+  - This is needed because the parent `ssh` waits for the child process to terminate after passing the FD
+  - Not running in background would hence make the parent `ssh` wait forever
+- `s` is the first magic to tell `p` to immediately run the `ssh user@jumphost` as the first (and only) passed in FD
+  - This magic creates a `socketpair()` when `s` is active in `p` mode (which actually is a hack to do something meaningful)
+- `p` means proxy mode, that is "receive FDs and pass FDs" at the same time
+- `-` is the second magic and tells `p` that it shall read the `FDs` from FD 0.
+  - you can write `0` here as well, however with `-` (STDIN) it is better readable
+  - Usually `p` would read the FDs from this socket (FD 0 here), however in the `s` case this is a dummy
+- `0 -1` means to pass the `socketpair()` to the command as FD 0 and 1
+  - This only is a bit of magic, because this is a standard feature to duplicate some FD into another FD
+- `--` means end of options, command follows
+- Then the `ssh` is executed with STDIN and STDOUT connected to the `socketpair()` at one side
+  - The other side is passed (due to `u 0`) to the parent `ssh` via the original FD 0.
+
+Note that this is a degenerated case of the `p` command.  Ususally you can have a socket definition where the `-` sits and read the FDs from this socket.
+You also can use the command as a talk script to the socket to open it (perhaps hopping over some loops to reach the real destination).
+
+Note: It is likely that I will change the `p` command in future.  But this functionality will hopefully work in future, too.
+
+
 # BUGs
 
 - It is far too unintuitive to use
   - Can more and better examples help?
 
-- socketpair option not yet implemented
-  - I am not completely sure how to do it properly and in which situation it would be helpful
-  - If you have any idea please open Issue
+- socketpair option not yet implemented (except for the `s p` hack)
+  - If you have any better idea (except `|command` as a socket) please open Issue
 
 - Inverse passing not yet implemented
   - Means: pass from open socket to new socket
