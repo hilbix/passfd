@@ -2,8 +2,7 @@
 > 
 > However the examples work as advertized.
 
-[![passfd Build Status](https://api.cirrus-ci.com/github/hilbix/passfd.svg)](https://cirrus-ci.com/github/hilbix/passfd/master)
-
+[![passfd Build Status](https://github.com/hilbix/passfd/actions/workflows/linux-test.yml/badge.svg)](https://github.com/hilbix/passfd/actions/workflows/linux-test.yml)
 
 # PassFD
 
