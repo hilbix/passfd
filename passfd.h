@@ -52,7 +52,7 @@ struct PFD_passfd
 
     unsigned		done:1;
 
-    unsigned		listen:1, accept:1, connect:1, onsuccess:1, onerror:1, dofork:1, keepfds:1, verbose:1;
+    unsigned		listen:1, accept:1, connect:1, onsuccess:1, onerror:1, dofork:1, keepfds:1, verbose:1, background:1;
     unsigned char	mode;
 
     int			retry;
@@ -726,7 +726,7 @@ P(waitpid, void, pid_t pid)
   PFD_OOPS(_, "waitpid(): too many loops");
 }
 
-/* dofork>0:	fork() and return as child
+/* dofork>0:	fork() and return as child (if not ->background)
  * dofork==0:	exec (no fork())
  * dofork<0:	fork() and return as parent
  * map==0:	pass fds as is
@@ -757,7 +757,7 @@ P(exec, void, int dofork, int map)
       pid	= fork();
       if (pid == (pid_t)-1)
         PFD_OOPS(_, "fork() failed");
-      if (dofork>0)
+      if (dofork>0 && !_->background)
         {
           if (!pid)
             return;	/* we return as child, as we terminate later on, but the forked command may stay */
@@ -766,7 +766,8 @@ P(exec, void, int dofork, int map)
       else if (pid)
         {
           PFD_V(_, "running %d: %s", (int)pid, _->cmd[0]);
-          PFD_waitpid(_, pid);
+          if (!_->background)
+            PFD_waitpid(_, pid);
           return;
         }
     }
@@ -778,6 +779,8 @@ P(exec, void, int dofork, int map)
        * on o: pass the received FDs as listed
        * on p: pass the received FDs as listed
        */
+      if (map<0)
+        PFD_close(_, -map, "after fork");
       if (_->recfds)
         PFD_map(_);
       PFD_V(_, "exec %s", _->cmd[0]);
@@ -812,10 +815,18 @@ P(fork, void)
 #if 1
           PFD_V(_, "socketpair %d %d", fds[0], fds[1]);
 #endif
-          PFD_cloexec(_, fds[0], 1);
-          PFD_recfdset(_, 1, fds[1]);
-          PFD_exec(_, 1, -1);
-          PFD_close(_, fds[1], "socketpair");
+          /* That's a bit tricky:
+           * As we return as child, we cannot use cloexec() on fd[1]
+           * So we must map the fd somewhere to close it after the fork()
+           * for this we pass a negative map value.  Hacky, I know.
+           */
+          PFD_FATAL(fds[1]<=0, "socketpair returned fd %d <=0", fds[1]);
+          PFD_cloexec(_, fds[0], 0);
+          PFD_cloexec(_, fds[1], 0);
+          PFD_recfdset(_, 1, fds[0]);		/* pass fds[0] to exec	*/
+          PFD_exec(_, 1, -fds[1]);		/* close fds[1] in forked cmd	*/
+          PFD_close(_, fds[0], "socketpair");	/* free fds[0] as it was passed	*/
+          PFD_recfdset(_, 1, fds[1]);		/* add our side to the FDs to proxy	*/
           return;
 
         case 'i':	if (_->connect) return;
@@ -1411,19 +1422,19 @@ P(setopt, char * const *, char * const * argv)
 
         case 'l':	_->listen	= 1;			/*fallthru*/
         case 'a':	_->accept	= 1;			break;
+        case 'b':	_->background	= 1;			break;
         case 'c':	_->connect	= 1;			break;
-        /*d*/
         case 'e':	_->onerror	= 1;			break;
         case 'f':	_->dofork	= 1;			break;
-        /*hi*/
+        /*j*/
         case 'k':	_->keepfds	= 1;			break;
-        /*lop*/
+        /*mnq*/
         case 'r':	argv		= PFD_Sretry(_, argv);	continue;
         case 's':	_->onsuccess	= 1;			break;
         case 't':	argv		= PFD_Stmeout(_, argv);	continue;
         case 'u':	argv		= PFD_Suse(_, argv);	continue;
-        case 'w':	argv 		= PFD_Swait(_, argv);	continue;
         case 'v':	_->verbose	= 1;			break;
+        case 'w':	argv 		= PFD_Swait(_, argv);	continue;
 
         /* mode	*/
         case 'd':
@@ -1583,6 +1594,7 @@ P(recvfd, void)
 
   for (;;)
     {
+      PFD_V(_, "waiting to receive FDs");
       sz		= recvmsg(_->sock, &msg, 0);
       if (sz>0)
         break;
@@ -1590,7 +1602,7 @@ P(recvfd, void)
         PFD_OOPS(_, "recvmsg() error");
     }
   if (sz != sizeof mbuf)
-    PFD_OOPS(_, "recvmsg() %d bytes expedted but %d bytes got", (int)sizeof mbuf, (int)sz);
+    PFD_OOPS(_, "recvmsg() %d bytes expected but %d bytes got", (int)sizeof mbuf, (int)sz);
 
   cmsg	= CMSG_FIRSTHDR(&msg);
   if (!cmsg)
@@ -1619,24 +1631,20 @@ P(recvfd, void)
 
 P(icmp, int, int a, int b)
 {
-  int	n, m;
-
-  n	= a<_->fds[0] ? _->fds[a+1] : a;
-  m	= b<_->fds[0] ? _->fds[b+1] : b;
-  return n - m;
+  return _->fds[a+1] - _->fds[b+1];
 }
 
 P(iswap, void, int a, int b)
 {
   int	tmp;
 
-  tmp		= _->fds[a];
-  _->fds[a]	= _->fds[b];
-  _->fds[b]	= tmp;
+  tmp			= _->fds[a+1];
+  _->fds[a+1]		= _->fds[b+1];
+  _->fds[b+1]		= tmp;
 
-  tmp		= _->recfds[a];
-  _->recfds[a]	= _->recfds[b];
-  _->recfds[b]	= tmp;
+  tmp			= _->recfds[a+1];
+  _->recfds[a+1]	= _->recfds[b+1];
+  _->recfds[b+1]	= tmp;
 }
 
 /* Sort *list according to *sort
@@ -1645,13 +1653,15 @@ P(iswap, void, int a, int b)
  */
 P(sorter, void)
 {
-  int n, m;
+  const int x = _->fds[0];
+  const int y = _->recfds[0];
 
-  m	= _->fds[0];
-  n	= _->recfds[0];
-  if (n < m)
-    PFD_OOPS(_, "too few FDs received, got %d, expected at least %d", n, m);
-  mergesort(_, n, PFD_icmp, PFD_iswap, PFD_alloc, PFD_free);
+  if (x < y)
+    {
+      _->fds	= PFD_realloc(_, _->fds, (y+1) * sizeof *_->fds);
+      for (int i=x; ++i<=y; _->fds[i] = 0);
+    }
+  mergesort(_, y, PFD_icmp, PFD_iswap, PFD_alloc, PFD_free);
 }
 
 P(sendfds, void)
@@ -1693,11 +1703,34 @@ P(main_o, void)
   PFD_recvfd(_);
 }
 
+#if 0
+P(fdinlist, int, int *list, int fd)
+{
+  int	*fds, n;
+
+  for (n=PFD_ints(_, list, &fds); --n>=0; )
+    if (*fds++ == fd)
+      return 1;
+  return 0;
+}
+#endif
+
 P(main_p, void)
 {
   PFD_V(_, "pass: proxy");
   PFD_open(_, 0);
-  PFD_recvfd(_);
+  /* if we already have recfds from open()
+   * we do not override those!
+   * see socketpair() above
+   */
+  if (!_->recfds)
+    {
+      PFD_recvfd(_);
+#if 0
+      if (_->fds[0] > _->recfds[0])
+        PFD_OOPS(_, "too few FDs received, got %d, expected at least %d", _->recfds[0], _->fds[0]);
+#endif
+    }
 
   PFD_sorter(_);
   PFD_sendfds(_);
