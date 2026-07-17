@@ -2,7 +2,9 @@
 > 
 > However the examples work as advertized.
 
-[![passfd Build Status](https://github.com/hilbix/passfd/actions/workflows/linux-test.yml/badge.svg)](https://github.com/hilbix/passfd/actions/workflows/linux-test.yml)
+| [master](https://github.com/hilbix/passfd/tree/master) | [dev](https://github.com/hilbix/passfd/tree/dev) |
+| --- | --- |
+| ![passfd master build status](https://github.com/hilbix/passfd/actions/workflows/linux-test.yml/badge.svg) | ![passfd dev build status](https://github.com/hilbix/passfd/actions/workflows/linux-test.yml/badge.svg?branch=dev) |
 
 # PassFD
 
