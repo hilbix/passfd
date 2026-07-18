@@ -61,7 +61,7 @@ struct PFD_passfd
     const char		*sockname;
     int			*fds, *waits, *uses, *recfds;
     char * const	*cmd;
-    int			ret;
+    int			ret;		/* return status of last command execution (not 0 means error)	*/
 
     int			afake;
     struct addrinfo	*as, *a;
@@ -721,7 +721,10 @@ P(waitpid, void, pid_t pid)
         }
       PFD_V(_, "child %d: %s status %d", (int)ret, s, _->ret);
       if (ret == pid)
-        return;
+        {
+          _->code	= _->ret;
+          return;
+        }
     } while (--brute);
   PFD_OOPS(_, "waitpid(): too many loops");
 }
@@ -738,6 +741,7 @@ P(exec, void, int dofork, int map)
   if (_->done)
     return;
   _->done	= 1;
+  _->ret	= 0;	/* preset everything ok	*/
 
   if (!_->cmd)
     return;
@@ -824,7 +828,7 @@ P(fork, void)
           PFD_cloexec(_, fds[0], 0);
           PFD_cloexec(_, fds[1], 0);
           PFD_recfdset(_, 1, fds[0]);		/* pass fds[0] to exec	*/
-          PFD_exec(_, 1, -fds[1]);		/* close fds[1] in forked cmd	*/
+          PFD_exec(_, -1, -fds[1]);		/* close fds[1] in forked cmd	*/
           PFD_close(_, fds[0], "socketpair");	/* free fds[0] as it was passed	*/
           PFD_recfdset(_, 1, fds[1]);		/* add our side to the FDs to proxy	*/
           return;
@@ -1002,7 +1006,10 @@ P(accept, void, struct sockaddr_un *un, socklen_t max, int create)
           PFD_recfdset(_, 1, fd);
           PFD_exec(_, 1, 1);
           if (_->ret)
-            continue;
+            {
+              _->done	= 0;	/* reset execution	*/
+              continue;
+            }
         }
       PFD_cloexec(_, fd, 1);
       PFD_unlink_sock(_, _->sock);
@@ -1387,7 +1394,7 @@ P(usage, void)
         "	fork	exec cmd after socket established (default for d)\n"
         "	use	use the given FDs for passing (the other) FDs (d and p).  Default: 0\n"
         "	keep	keep passed FDs open for forked cmd ('i' only)\n"
-	"	bg	exec cmd in background\n"
+        "	bg	exec cmd in background\n"
         "	verbose	enable additional output to STDERR\n"
         "mode:\n"
         "	direct	pass socket to FD given in use: connect, exec cmd with socket, pass if OK\n"
@@ -1732,6 +1739,8 @@ P(main_p, void)
         PFD_OOPS(_, "too few FDs received, got %d, expected at least %d", _->recfds[0], _->fds[0]);
 #endif
     }
+  if (_->ret)
+    return;			/* exec returned failure	*/
 
   PFD_sorter(_);
   PFD_sendfds(_);
