@@ -865,7 +865,7 @@ P(retry, int, struct PFD_retry *r)
   if (!r->inits)
     PFD_retry_init(_, r);
 
-  if (r->count > _->retry && _->retry >= 0)
+  if (r->count >= _->retry && _->retry >= 0)
     return 1;	/* number retries exeeded	*/
 
   if (r->ms)
