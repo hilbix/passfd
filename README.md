@@ -177,7 +177,7 @@ Like this:
 
 	case "$1" in
 	(127.0.0.1:*)	exec /usr/local/bin/passfd v direct "$1:$2";;
-	(*)		exec /usr/local/bin/passfd v u 0 b s p - 0 -1 -- /usr/bin/ssh user@jumphost -W "$1:$2";;
+	(*)		exec /usr/local/bin/passfd v u 0 s p - 0 -1 -- /usr/bin/ssh -f -N user@jumphost -W "$1:$2";;
 	esac
 
 Why it is a bit cryptic and what this does:
@@ -198,6 +198,10 @@ Why it is a bit cryptic and what this does:
 - `--` means end of options, command follows
 - Then the `ssh` is executed with STDIN and STDOUT connected to the `socketpair()` at one side
   - The other side is passed (due to `u 0`) to the parent `ssh` via the original FD 0.
+- Instead of `b` you can use `-f -N` with the forked `ssh` to catch errors in the setup phase:
+  - You need `-f` because the parent `ssh` waits for the child process to terminate after passing the FD
+  - You need the `-N` to keep the passed FD open after `ssh` goes into the background
+  - This way the forked `ssh` only comes back with success when the connection is successful
 
 Note that this is a degenerated case of the `p` command.  Ususally you can have a socket definition where the `-` sits and read the FDs from this socket.
 You also can use the command as a talk script to the socket to open it (perhaps hopping over some loops to reach the real destination).
